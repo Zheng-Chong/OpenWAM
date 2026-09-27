@@ -45,14 +45,15 @@
 
 ## 剩余事项与风险
 
-- 正式训练尚未启动（需要用户确认步数和资源）。
+- 正式 mid-train 已于 2026-09-27 在 dsw-1 启动（目标：专门做 G1 的基座，全参）：8 卡、每卡 batch 24、20000 步，video_lr=3e-5 / action_lr=1e-4（cosine 衰减，前 5% warmup），每 2000 步保存，保留最近 3 个；约 8.7 s/步，预计约 48 小时。日志：`/root/openwam_g1_logs/midtrain.log`，输出：`/root/openwam_g1/runs/`（本地盘）。
+- 只在 G1 数据上训练，其他本体的能力会退化，这是有意为之。
 - min-max 统计量受位置离群值影响：大部分数据只占 [-1,1] 中间约一半区间。如果精度不理想，可以考虑清洗离群轨迹。
 - `wandb` 在 DSW 上未登录，需设置 `WANDB_MODE=offline`。
 - 部署客户端（EEF → IK → 关节）尚未实现，本阶段只做离线评估。
 
 ## 下一会话
 
-1. 检查 DSW 上的正式训练是否在运行：`/root/openwam_g1_logs/`、`/root/openwam_g1/runs/`。
+1. 检查 dsw-1 上的 mid-train 进度：`tail -c 2000 /root/openwam_g1_logs/midtrain.log | tr '\r' '\n' | tail -2`；可以在 dsw-2 到 dsw-7 上对中间 checkpoint 做离线评估（checkpoint 在 dsw-1 本地盘，需要先复制过去）。
 2. 训练完成后：
    ```
    for i in 0..7: CUDA_VISIBLE_DEVICES=$i python3 scripts/eval_offline.py --ckpt-dir <run> --out <dir>/shard$i.jsonl --shard $i --num-shards 8
@@ -61,4 +62,5 @@
 
 ## 最近历史
 
+- 2026-09-27：启动 G1 mid-train（全参，视频 / 动作分开设学习率，20000 步）。
 - 2026-09-27：新增 G1-Dex1 多任务读取器、共享统计量、离线评估脚本；DSW 上 debug 微调和离线评估均已跑通。
