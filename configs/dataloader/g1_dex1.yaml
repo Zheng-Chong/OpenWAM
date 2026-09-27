@@ -1,0 +1,45 @@
+# Unitree G1 + Dex1 gripper, multi-task LeRobot v3 (unitreerobotics/G1_Dex1_*).
+# dataset_dir is the root holding one sub-directory per task. Only LeRobot v3.0
+# buckets with torso-frame EEF columns (*_ee_pose_gripper_torso) are used;
+# v2.1 / joint-only buckets are skipped at discovery.
+type: g1_dex1
+dataset_dir: /path/to/Unitree_G1_Dex1
+tasks: null            # null = every compatible bucket; or an explicit list of task dirs
+exclude_tasks: null    # task dirs to drop from discovery
+
+# ── Action space ─────────────────────────────────────────────────────────────
+# Raw EEF20 = per arm [xyz3 (torso frame), rot6d6 (from extrinsic XYZ Euler),
+# open1 (-1 closed, +1 open)], left then right; scattered into the α
+# bimanual gripper slots: left -> 0:10, right -> 34:44.
+action_mode: eef
+unify_action: true
+unify_action_map: ["0-9", "34-43"]
+unify_state_map: null  # null = state reuses unify_action_map
+
+# ── Frame sampling (α contract: 32-action chunk, 9 video frames) ─────────────
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# ── Split ────────────────────────────────────────────────────────────────────
+# episode_index % val_every == 0 -> val (~2%), the rest -> train.
+val_every: 50
+
+# ── Image layout: head_stereo_left + wrist_left + wrist_right L-shape ────────
+height: 384
+width: 320
+multiview: true
+
+# ── Normalization ────────────────────────────────────────────────────────────
+# One pooled stats file for all tasks (train split, action + state), built by
+#   python -m openwam.dataloader.utils.stats_computation.g1_dex1_stats_computation \
+#     --config configs/dataloader/g1_dex1.yaml --output <path>.npy
+normalize_mode: min-max
+normalization_stats_path: /path/to/g1_dex1_normalization_stats.npy
+
+color_jitter:
+  enabled: true
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
