@@ -34,6 +34,26 @@ def encode_text(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tens
     return context, seq_lens
 
 
+def encode_text_cached(prompts: list, *, cache: dict, max_size: int, tokenizer, text_encoder, device):
+    """Training ``encode_text`` with a per-prompt cache for the frozen text encoder.
+
+    Only prompts missing from ``cache`` are encoded (one batch). Rows are stored
+    individually, so the result matches single-prompt encoding exactly as deploy
+    does. The cache stops growing at ``max_size``; overflow prompts are encoded
+    every call.
+    """
+    missing = list(dict.fromkeys(p for p in prompts if p not in cache))
+    fresh = {}
+    if missing:
+        context, seq_lens = encode_text(missing, tokenizer=tokenizer, text_encoder=text_encoder, device=device)
+        for i, p in enumerate(missing):
+            fresh[p] = (context[i].clone(), seq_lens[i].clone())
+            if len(cache) < max_size:
+                cache[p] = fresh[p]
+    rows = [cache.get(p) or fresh[p] for p in prompts]
+    return torch.stack([r[0] for r in rows]), torch.stack([r[1] for r in rows])
+
+
 def encode_text_for_inference(
     prompt, *, vace_cache, prompt_embed_cache, tokenizer, text_encoder, device
 ) -> Tuple[Tensor, Tensor]:

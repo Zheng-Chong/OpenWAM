@@ -770,9 +770,22 @@ class WanBase(VideoBackbone):
         )
 
         batch_size = len(frames)
-        context, seq_lens = wan_encode.encode_text(
-            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
-        )
+        cache_size = getattr(self, "train_prompt_embed_cache_size", 0)
+        if cache_size > 0:
+            if not hasattr(self, "_train_prompt_embed_cache"):
+                self._train_prompt_embed_cache = {}
+            context, seq_lens = wan_encode.encode_text_cached(
+                text,
+                cache=self._train_prompt_embed_cache,
+                max_size=cache_size,
+                tokenizer=self._tokenizer,
+                text_encoder=self.text_encoder,
+                device=self.device,
+            )
+        else:
+            context, seq_lens = wan_encode.encode_text(
+                text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
+            )
 
         all_input_videos = []
         for clip_frames in frames:

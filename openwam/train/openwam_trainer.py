@@ -164,6 +164,7 @@ class OpenWAMTrainer:
             use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
             max_timestep_boundary=float(t.max_timestep_boundary),
             min_timestep_boundary=float(t.min_timestep_boundary),
+            prompt_embed_cache_size=int(t.get("prompt_embed_cache_size", 0) or 0),
         )
 
         self.model = self  # self-reference some external callers expect
