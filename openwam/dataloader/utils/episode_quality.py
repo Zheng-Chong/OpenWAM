@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Rule-based episode quality scan for LeRobot v3 buckets.
+
+Computes cheap per-episode metrics, flags episodes that break a rule, and
+(with ``--apply``) merges them into each bucket's ``meta/excluded_episodes.json``
+— the blacklist every LeRobotV3Reader and stats tool already honors. Raw data
+is never modified. Regenerate normalization stats after applying.
+
+Rules (thresholds are CLI flags; inspect ``quality.parquet`` before applying):
+
+* ``too_short`` / ``too_long``   length < ``--min-seconds`` or > ``--max-len-x-median`` × bucket median
+* ``nonfinite``                  NaN/inf in a pose / effector column
+* ``pos_jump``                   per-step EEF xyz move > ``--max-step-m``
+* ``rot_jump``                   per-step EEF rotation > ``--max-step-deg``
+* ``invalid_rot6d``              rot6d columns far from orthonormal
+* ``static``                     EEF path < ``--min-path-m`` and effector range < ``--min-effector-range``
+* ``bad_prompt``                 empty / too short / placeholder instruction
+* ``black_video`` / ``frozen_video`` / ``bad_video``   (``--video``) sampled head frames
+  dark, identical, or undecodable
+
+    python -m openwam.dataloader.utils.episode_quality \
+        --root /root/AgiBotWorld-Beta-lerobotv3 --out /root/agibot_quality --video --workers 48
+    # review, then rerun with --apply
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+
+from openwam.dataloader.utils.exclusion_io import atomic_publish_text, locked_exclusion_files
+from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet, parse_info_json
+
+POSE_COL = "observation.state.ee_base"
+EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
+# 18-D ee_base = [L_xyz, L_rot6d, R_xyz, R_rot6d]
+ARMS = ((slice(0, 3), slice(3, 9)), (slice(9, 12), slice(12, 18)))
+HEAD_CAMERA = "observation.images.head"
+PLACEHOLDER = re.compile(r"^(null|none|nan|n/?a|todo|test|task|do something|default)\W*$", re.I)
+
+
+def _rot6d_to_mat(r6: np.ndarray) -> np.ndarray:
+    """(T,6) → (T,3,3) via Gram-Schmidt, columns = [a, b, a×b]."""
+    a = r6[:, 0:3] / np.linalg.norm(r6[:, 0:3], axis=-1, keepdims=True)
+    b = r6[:, 3:6] - (a * r6[:, 3:6]).sum(-1, keepdims=True) * a
+    b /= np.linalg.norm(b, axis=-1, keepdims=True)
+    return np.stack([a, b, np.cross(a, b)], axis=-1)
+
+
+def pose_metrics(pose: np.ndarray) -> dict:
+    """Motion metrics over both arms of an (T,18) ee_base track."""
+    out = {"max_step_m": 0.0, "max_step_deg": 0.0, "path_m": 0.0, "rot6d_err": 0.0}
+    for xyz_s, rot_s in ARMS:
+        xyz, r6 = pose[:, xyz_s], pose[:, rot_s]
+        out["rot6d_err"] = max(
+            out["rot6d_err"],
+            float(np.abs(np.linalg.norm(r6[:, :3], axis=-1) - 1).max()),
+            float(np.abs(np.linalg.norm(r6[:, 3:], axis=-1) - 1).max()),
+            float(np.abs((r6[:, :3] * r6[:, 3:]).sum(-1)).max()),
+        )
+        if len(pose) < 2:
+            continue
+        step = np.linalg.norm(np.diff(xyz, axis=0), axis=-1)
+        out["max_step_m"] = max(out["max_step_m"], float(step.max()))
+        out["path_m"] += float(step.sum())
+        m = _rot6d_to_mat(r6)
+        cos = (np.einsum("tij,tij->t", m[1:], m[:-1]) - 1) / 2  # trace(R1ᵀR0)
+        out["max_step_deg"] = max(out["max_step_deg"], float(np.degrees(np.arccos(np.clip(cos, -1, 1))).max()))
+    return out
+
+
+def prompt_ok(text: str) -> bool:
+    text = (text or "").strip()
+    return len(re.findall(r"[^\W\d_]{2,}", text)) >= 2 and not PLACEHOLDER.match(text)
+
+
+def video_metrics(path: Path, t0: float, t1: float, samples: int) -> dict:
+    """Keyframe-only decode of ``[t0, t1)`` s: cheap enough for black / frozen checks."""
+    import av
+
+    try:
+        with av.open(str(path)) as c:
+            stream = c.streams.video[0]
+            keys = [
+                p for p in c.demux(stream)
+                if p.is_keyframe and p.pts is not None and t0 <= float(p.pts * stream.time_base) < t1
+            ]
+            pick = [keys[i] for i in np.unique(np.linspace(0, len(keys) - 1, min(samples, len(keys))).astype(int))]
+            frames = [f for p in pick for f in stream.codec_context.decode(p)]
+            frames += stream.codec_context.decode(None)  # dav1d buffers until flushed
+            imgs = [f.to_ndarray(width=128, height=96, format="rgb24").astype(np.float32) for f in frames]
+    except Exception:  # noqa: BLE001 - any decode failure is the finding
+        imgs = []
+    if not imgs:
+        return {"video_ok": False, "video_mean": np.nan, "video_max_diff": np.nan}
+    imgs = np.stack(imgs)
+    return {
+        "video_ok": True,
+        "video_mean": float(imgs.mean()),
+        "video_max_diff": float(np.abs(np.diff(imgs, axis=0)).mean(axis=(1, 2, 3)).max()) if len(imgs) > 1 else np.nan,
+    }
+
+
+def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.DataFrame:
+    root = Path(bucket)
+    info = parse_info_json(root)
+    eps = load_episodes_parquet(root)
+    eps["_row"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
+    vcol = (f"videos/{HEAD_CAMERA}/chunk_index", f"videos/{HEAD_CAMERA}/file_index")
+    tasks = pd.read_parquet(root / "meta" / "tasks.parquet")
+    task_text = dict(zip(tasks["task_index"], tasks.index))
+
+    rows = []
+    for (chunk, file), group in eps.groupby(["data/chunk_index", "data/file_index"]):
+        path = root / info["data_path"].format(chunk_index=chunk, file_index=file)
+        names = set(pq.read_schema(path).names)
+        cols = [c for c in (POSE_COL, *EFFECTOR_COLS, "task_index") if c in names]
+        table = pq.read_table(path, columns=cols)
+        for _, ep in group.iterrows():
+            n, start = int(ep["length"]), int(ep["_row"])
+            win = table.slice(start, n)
+            r = {"bucket": root.name, "episode_index": int(ep["episode_index"]), "length": n}
+            pose = np.stack(win[POSE_COL].to_numpy(zero_copy_only=False)).astype(np.float64)
+            eff = [np.stack(win[c].to_numpy(zero_copy_only=False)).astype(np.float64) for c in EFFECTOR_COLS if c in cols]
+            r["nonfinite"] = not (np.isfinite(pose).all() and all(np.isfinite(e).all() for e in eff))
+            r.update(pose_metrics(np.nan_to_num(pose)) if not r["nonfinite"] else {})
+            r["effector_range"] = float(max((np.ptp(e, axis=0).max() for e in eff), default=0.0))
+            r["prompt_ok"] = all(prompt_ok(task_text.get(int(t), "")) for t in set(win["task_index"].to_pylist()))
+            if video and vcol[0] in eps.columns:
+                vpath = root / info["video_path"].format(
+                    video_key=HEAD_CAMERA, chunk_index=int(ep[vcol[0]]), file_index=int(ep[vcol[1]])
+                )
+                t0 = float(ep.get(f"videos/{HEAD_CAMERA}/from_timestamp", 0.0))
+                t1 = float(ep.get(f"videos/{HEAD_CAMERA}/to_timestamp", np.inf))
+                r.update(video_metrics(vpath, t0, t1, video_samples))
+            rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def flag(df: pd.DataFrame, a: argparse.Namespace, fps_by_bucket: dict[str, float]) -> pd.Series:
+    """Return a ``;``-joined reason string per episode ('' = keep)."""
+    fps = df["bucket"].map(fps_by_bucket)
+    median = df.groupby("bucket")["length"].transform("median")
+    rules = {
+        "too_short": df["length"] < a.min_seconds * fps,
+        "too_long": df["length"] > a.max_len_x_median * median,
+        "nonfinite": df["nonfinite"],
+        "pos_jump": df["max_step_m"] > a.max_step_m,
+        "rot_jump": df["max_step_deg"] > a.max_step_deg,
+        "invalid_rot6d": df["rot6d_err"] > 0.05,
+        "static": (df["path_m"] < a.min_path_m) & (df["effector_range"] < a.min_effector_range),
+        "bad_prompt": ~df["prompt_ok"],
+    }
+    if "video_ok" in df.columns:
+        rules["bad_video"] = df["video_ok"] == False  # noqa: E712 - NaN for unscanned rows stays False
+        rules["black_video"] = df["video_mean"] < a.min_brightness
+        rules["frozen_video"] = df["video_max_diff"] < a.min_frame_diff
+    reasons = pd.Series([""] * len(df), index=df.index)
+    for name, hit in rules.items():
+        hit = hit.fillna(False).astype(bool)
+        reasons[hit] = reasons[hit] + name + ";"
+    return reasons.str.rstrip(";")
+
+
+def apply_exclusions(root: Path, df: pd.DataFrame) -> None:
+    """Merge flagged episodes into each bucket's excluded_episodes.json."""
+    for bucket, group in df[df["reasons"] != ""].groupby("bucket"):
+        path = root / bucket / "meta" / "excluded_episodes.json"
+        with locked_exclusion_files([path]):
+            payload = json.loads(path.read_text()) if path.exists() else {"episode_indices": []}
+            payload["episode_indices"] = sorted(set(payload["episode_indices"]) | set(group["episode_index"].tolist()))
+            payload.setdefault("episode_quality", {}).update(
+                {str(e): r for e, r in zip(group["episode_index"], group["reasons"])}
+            )
+            atomic_publish_text(path, json.dumps(payload, indent=1))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", required=True, help="dataset root containing bucket dirs (or a single bucket)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--buckets", nargs="*")
+    ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--video", action="store_true", help="also decode sampled head frames")
+    ap.add_argument("--apply", action="store_true", help="write meta/excluded_episodes.json")
+    ap.add_argument("--min-seconds", type=float, default=2.0)
+    ap.add_argument("--max-len-x-median", type=float, default=5.0)
+    ap.add_argument("--max-step-m", type=float, default=0.10)
+    ap.add_argument("--max-step-deg", type=float, default=20.0)
+    ap.add_argument("--min-path-m", type=float, default=0.05)
+    ap.add_argument("--min-effector-range", type=float, default=0.05)
+    ap.add_argument("--min-brightness", type=float, default=10.0)
+    ap.add_argument("--min-frame-diff", type=float, default=0.5)
+    a = ap.parse_args()
+
+    root = Path(a.root)
+    if (root / "meta" / "info.json").is_file():
+        root, buckets = root.parent, [root.name]
+    else:
+        buckets = a.buckets or sorted(p.name for p in root.iterdir() if (p / "meta" / "info.json").is_file())
+    with ProcessPoolExecutor(a.workers) as pool:
+        futs = {b: pool.submit(scan_bucket, str(root / b), a.video) for b in buckets}
+        df = pd.concat([f.result() for f in futs.values()], ignore_index=True)
+    fps = {b: float(parse_info_json(root / b)["fps"]) for b in buckets}
+    df["reasons"] = flag(df, a, fps)
+
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out / "quality.parquet", index=False)
+    hits = df["reasons"].str.split(";").explode()
+    summary = {
+        "episodes": len(df),
+        "flagged": int((df["reasons"] != "").sum()),
+        "frames_flagged": int(df.loc[df["reasons"] != "", "length"].sum()),
+        "frames_total": int(df["length"].sum()),
+        "by_reason": hits[hits != ""].value_counts().to_dict(),
+        "thresholds": {k: v for k, v in vars(a).items() if k.startswith(("min_", "max_"))},
+        "applied": a.apply,
+    }
+    (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+    if a.apply:
+        apply_exclusions(root, df)
+
+
+if __name__ == "__main__":
+    main()

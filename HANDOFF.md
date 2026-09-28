@@ -1,8 +1,8 @@
 # Project Handoff
 
-更新时间：2026-09-27
+更新时间：2026-09-28
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
-当前目标：在 Unitree G1-Dex1 多任务数据上微调 OpenWAM-α，先做离线（开环）评估
+当前目标：G1-Dex1 mid-train 在跑；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
 ## 项目状态
 
@@ -12,44 +12,44 @@
 - 所有任务共用一份统计量，只在训练集上计算（action + state 合并），rot6d 和夹爪维度固定为恒等映射：`/mnt/data/chongzheng/openwam_g1/g1_dex1_normalization_stats.npy`。
 - 划分：`episode_index % 50 == 0` 为验证集（约 2%）。
 - 基础模型：`/mnt/data/models/OpenWAM-Alpha-Pretrain-Foundation-Model`（step 154000，24.8 GB）。
+- G1 关键约束：只用 v3.0 躯干系末端位姿任务；统计量 min-max；训练输出必须放本地盘（ossfs 不支持 safetensors 写入）；训练端可开 `training.prompt_embed_cache_size` 缓存 umT5 编码（每步约省 1.2 s）。
+- AgiBotWorld-Beta：原始数据 `/mnt/data/datasets/agibot_world_beta`（tar，仍在提取到 `agibot_world_beta_extracted`）；LeRobot v3 转换产物在 dsw-2 本地盘 `/root/AgiBotWorld-Beta-lerobotv3`。
 
 ## 最近任务
 
 ### 目标
-- 为 G1-Dex1 多任务微调打通数据 → 训练 → 离线评估的完整链路。
+- 把 AgiBotWorld-Beta 原始数据转成 `agibotworld` 读取器要的 LeRobot v3，并做规则式数据清洗（长度、数值、跳变、静止、指令、视频）。
 
 ### 已完成
-- 数据读取器 `g1_dex1`（单任务读取 + 根目录多任务聚合，显式列出 tasks 时如有任务加载失败会直接报错）。
-- 共享统计量的计算 CLI，已在 DSW 上生成统计文件。
-- `scripts/eval_offline.py`：在验证集窗口上开环推理，按物理单位计算指标（位置 mm、旋转角度、夹爪误差和开合准确率，按 horizon 分段），并与"保持当前位姿"基线对比；支持多卡分片和结果汇总。
-- DSW 8×H20 上跑通 debug 微调（20 步，每卡 batch 24，约 8.9 s/step，显存充足），并在其 checkpoint 上跑通离线评估（单卡约 0.4 s/块，不开编译）。
+- `openwam/dataloader/utils/agibotworld_convert.py`：原始 h5 + task_info + mp4 → 每任务一个 bucket；每条 episode 一个 parquet，视频软链到原始 AV1 mp4（不重编码）；`episode_index` = 原始 episode_id；`meta/info.json` 最后写，作为完成标记，重跑默认跳过已完成 bucket（`--overwrite` 重转）。
+- `openwam/dataloader/utils/episode_quality.py`：逐 episode 计算指标 → `quality.parquet` + `summary.json`；`--apply` 才把标出的 episode 合并进各 bucket 的 `meta/excluded_episodes.json`（复用 `exclusion_io` 的锁 + 原子写，附 `episode_quality` 原因）。视频检查只解码 5 个关键帧包（AV1 需 flush），约 0.1 s/条。
+- dsw-2 上全量转换：已提取的 199 个任务中 166 个成功，127,929 条 episode、2191 小时，产物 `/root/AgiBotWorld-Beta-lerobotv3`（41 GB，本地盘）。18 个任务无 h5、15 个无 task_info；46 个任务提取不完整（比 task_info 少 7298 条）；2 条视频损坏被跳过；灵巧手任务尚未提取，0 个。
+- 全量扫描（45 分钟，64 进程）：标出 2882 条（2.3%，56.8 小时），`pos_jump` 2861、`rot_jump` 32，其余规则（长度、NaN、静止、指令、黑屏 / 冻结 / 解码失败）全部 0 命中。结果：`/root/agibot_quality/`。**尚未 `--apply`**。
 
 ### 关键决策
-- 只用 v3.0 躯干系末端位姿的任务：腰部会动，而且 Unitree 的 IK 也在躯干系下求解。
-- 统计量按 α 规定用 min-max；位置维度存在离群值（min/max 明显宽于 q01/q99），暂不改，记为风险。
-- 末端无效帧的处理：窗口内有无效帧就抛异常，由 `_safe_get` 跳到下一个样本。当前数据中没有无效帧，所以不会触发。
-- 训练输出必须放本地盘（`/root/...`）：ossfs 不支持 safetensors 的写入方式（os error 95）。
+- 字段语义按官方 README 核对并实测：四元数 xyzw；末端是 flange 位姿（m，底盘系）；夹爪 action 0=开 / 1=合，state 单位 mm（35–125）→ 除以 1000 对上读取器的 0.035/0.125 m 标定（已用 action 与 state 的对应关系验证方向）；底盘 action 速度 `[vx, yaw]` → `[vx, 0, yaw]`，state 无来源写 0。
+- action 位姿 = 下一帧 state（读取器约定已做 next-state 重标）；夹爪 action 用原始 action 通道。
+- 每帧 prompt 用 `label_info.action_config` 的子任务文本，未覆盖帧用 `task_name`。
+- 产物放本地盘：ossfs 不支持软链。其他节点训练前 `rsync -a` 复制（软链指向共享的 `/mnt/data`，复制后仍有效）。
+- 原始数据没有 `segment_flag`，读取器用完整 episode（首尾静止帧未裁）。
+- 跳变阈值由 5 cm/帧放宽到 10 cm/帧：在任务 373 上，5 cm 标出的都是正常分布尾部的快速动作。
+- 位置跳变的成因：左右臂同一帧沿 z 平移相同距离、x/y 不变，推断是升降腰高度信号跳变（707/764 为单帧尖峰，725 为 0.5 m 阶跃）。725（Scan security check）和 748 两个任务 100% 被标出，整任务剔除会损失场景，所以先不 apply，等用户决定。
 
 ### 涉及范围
-- `openwam/dataloader/g1_dex1.py`：读取器、转换函数、多任务聚合。
-- `openwam/dataloader/registry.py`：注册 `g1_dex1`。
-- `openwam/dataloader/utils/stats_computation/g1_dex1_stats_computation.py`：统计量计算 CLI。
-- `configs/dataloader/g1_dex1.yaml`：数据配置（`dataset_dir` 和统计量路径为占位符，启动时通过命令行覆盖）。
-- `scripts/eval_offline.py`：离线评估。
-- `tests/dataloader/test_g1_dex1.py`、`tests/test_eval_offline.py`：测试。
+- `openwam/dataloader/utils/agibotworld_convert.py`、`openwam/dataloader/utils/episode_quality.py`（新增）。
+- `tests/dataloader/test_agibotworld_convert.py`（原始 → bucket → `AgiBotWorldDataset` 往返）、`tests/dataloader/test_episode_quality.py`。
+- 读取器、统计量代码未改。
 
 ### 验证
-- DSW（profile 标签 dsw-h20x8，系统 Python，env=none）隔离目录中运行：`G1_DEX1_ROOT=... G1_DEX1_STATS=... python3 -m pytest -q tests/dataloader/test_g1_dex1.py tests/test_eval_offline.py tests/test_action_normalization.py` → 43 passed。
-- 注意：技能自带的 `remote_validate.py` 会因为 git 子模块 `third_party/cosmos-predict2.5` 拒绝执行，因此改为手动 rsync 已跟踪文件到唯一临时目录，运行后删除。
-- 8 卡 debug 训练 20 步成功，保存 checkpoint 正常；在该 checkpoint 上离线评估 5 个窗口正常。
-
-### 训练速度分析（2026-09-27）
-- 在 dsw-2 上实测 8 卡、每卡 batch 24 时每步各阶段耗时（逐阶段 CUDA 同步计时）：umT5-XXL 文本编码 1.20 s（12%）、VAE 编码 1.70 s（17%）、DiT 前向约 1.6 s、反向 3.6 s（含梯度检查点重算）、其余约 1.7 s（优化器 / 梯度同步）。
-- 数据加载不是瓶颈：单个 rank 8 个 worker 每 1.75 s 就能出一个 batch，训练需要约 8 s 一个。
-- 关闭梯度检查点，每卡 batch 24 和 16 都显存溢出，所以必须保留。
-- 新增 `training.prompt_embed_cache_size`：按 prompt 缓存冻结的 umT5 编码结果（仅 Wan 骨干；默认 0 = 关闭）。G1 只有 360 条不同的 prompt，缓存约 1.4 GB 显存；预计每步省约 1.2 s（约 13–15%）。20 步的实测里缓存还没填满，文本编码已从 1.20 s 降到 0.54 s。
+- DSW（profile 标签 dsw-h20x8，系统 Python）隔离目录：`python3 -m pytest -q tests/dataloader/test_agibotworld_convert.py tests/dataloader/test_agibotworld.py tests/dataloader/test_episode_quality.py` → 45 passed。
+- 任务 373 真实读取：AV1 解码正常，三视角拼图正确，夹爪闭合为 0，底盘两维被监督（掩码 22 维）。
+- 本机没有 h5py，转换测试在本机会跳过。
 
 ## 剩余事项与风险
+
+- AgiBot：请用户决定是否 `--apply` 当前清洗结果（2.3%，含 725 / 748 整任务）；可选改为修复单帧 z 尖峰而不是丢弃。apply 后必须重新生成 `stats_g2a.json`（读取器会校验排除后的样本集合）。
+- AgiBot：提取完成后对不完整任务（conversion_report 中 `episodes + skipped < task_info_episodes`）加 `--overwrite` 重转；灵巧手任务（`_DEX_BUCKET_IDS`）的转换分支未经真实数据验证。
+- AgiBot：还没生成 `stats_g2a.json`，也没用它训练过；首尾静止帧未裁（无 `segment_flag`）；基于 VLM 的指令一致性 / 成功判断未做。
 
 - 正式 mid-train 已于 2026-09-27 在 dsw-1 启动（目标：专门做 G1 的基座，全参）：8 卡、每卡 batch 24、20000 步，video_lr=3e-5 / action_lr=1e-4（cosine 衰减，前 5% warmup），每 2000 步保存，保留最近 3 个；约 8.7 s/步，预计约 48 小时。日志：`/root/openwam_g1_logs/midtrain.log`，输出：`/root/openwam_g1/runs/`（本地盘）。
 - 只在 G1 数据上训练，其他本体的能力会退化，这是有意为之。
@@ -59,6 +59,7 @@
 
 ## 下一会话
 
+0. AgiBot 清洗：看 `/root/agibot_quality/summary.json`（dsw-2），用户确认后：`python3 -m openwam.dataloader.utils.episode_quality --root /root/AgiBotWorld-Beta-lerobotv3 --out /root/agibot_quality --video --workers 64 --apply`，再跑 `agibotworld_stats_computation --dataset_dir /root/AgiBotWorld-Beta-lerobotv3 --segment-max-trim-ratio 0.7`。
 1. 检查 dsw-1 上的 mid-train 进度：`tail -c 2000 /root/openwam_g1_logs/midtrain.log | tr '\r' '\n' | tail -2`；可以在 dsw-2 到 dsw-7 上对中间 checkpoint 做离线评估（checkpoint 在 dsw-1 本地盘，需要先复制过去）。
 2. 训练完成后：
    ```
@@ -67,6 +68,8 @@
    ```
 
 ## 最近历史
+
+- 2026-09-28：新增 AgiBotWorld-Beta 原始 → LeRobot v3 转换和规则式 episode 质量扫描；全量转换 12.8 万条，扫描标出 2.3%（未 apply）。
 
 - 2026-09-27：分析训练速度（瓶颈在计算，不在数据），新增训练端 prompt 编码缓存。
 - 2026-09-27：启动 G1 mid-train（全参，视频 / 动作分开设学习率，20000 步）。
