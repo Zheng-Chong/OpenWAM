@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import defaultdict
@@ -193,6 +194,9 @@ def main() -> None:
     if not (args.ckpt_dir and args.out):
         p.error("--ckpt-dir and --out are required unless --summarize is given")
     run(args)
+    # ponytail: lingering non-daemon threads/workers kept the process alive after results were written; hard exit
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
