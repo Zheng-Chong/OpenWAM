@@ -3,6 +3,7 @@
 
 Computes cheap per-episode metrics, flags episodes that break a rule, and
 (with ``--apply``) merges them into each bucket's ``meta/excluded_episodes.json``
+(or with ``--delete`` physically removes them from converter-layout buckets)
 — the blacklist every LeRobotV3Reader and stats tool already honors. Raw data
 is never modified. Regenerate normalization stats after applying.
 
@@ -28,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -182,6 +184,48 @@ def apply_exclusions(root: Path, df: pd.DataFrame) -> None:
             atomic_publish_text(path, json.dumps(payload, indent=1))
 
 
+def delete_episodes(root: Path, df: pd.DataFrame) -> None:
+    """Physically drop flagged episodes from converter-layout buckets.
+
+    Only for the one-episode-per-data-file layout written by
+    ``agibotworld_convert`` (anything else would need shard rewrites, so it is
+    refused). Removes the data file and video links, rewrites the episodes
+    table and info totals, and logs reasons to ``meta/deleted_episodes.json``. A bucket left empty
+    is removed and recorded in ``<root>/deleted_buckets.json``.
+    """
+    for bucket, group in df[df["reasons"] != ""].groupby("bucket"):
+        b = root / bucket
+        info = parse_info_json(b)
+        eps = load_episodes_parquet(b)
+        if eps.duplicated(["data/chunk_index", "data/file_index"]).any():
+            raise ValueError(f"{b}: several episodes share a data file; delete needs the converter layout")
+        drop = eps["episode_index"].isin(group["episode_index"])
+        video_keys = [c.split("/")[1] for c in eps.columns if c.startswith("videos/") and c.endswith("/chunk_index")]
+        for _, ep in eps[drop].iterrows():
+            ci, fi = int(ep["data/chunk_index"]), int(ep["data/file_index"])
+            (b / info["data_path"].format(chunk_index=ci, file_index=fi)).unlink(missing_ok=True)
+            for k in video_keys:
+                (b / info["video_path"].format(video_key=k, chunk_index=ci, file_index=fi)).unlink(missing_ok=True)
+        kept = eps[~drop]
+        if kept.empty:  # readers reject empty buckets: drop it, keep a root-level record
+            log = root / "deleted_buckets.json"
+            record = json.loads(log.read_text()) if log.exists() else {}
+            record[bucket] = {"episodes": len(eps), "reasons": group["reasons"].value_counts().to_dict()}
+            log.write_text(json.dumps(record, indent=1))
+            shutil.rmtree(b)
+            continue
+        for f in (b / "meta" / "episodes").glob("*.parquet"):
+            f.unlink()
+        kept.to_parquet(b / "meta" / "episodes" / "chunk-000.parquet", index=False)
+        raw_info = json.loads((b / "meta" / "info.json").read_text())
+        raw_info.update(total_episodes=len(kept), total_frames=int(kept["length"].sum()))
+        (b / "meta" / "info.json").write_text(json.dumps(raw_info, indent=2, ensure_ascii=False))
+        log = b / "meta" / "deleted_episodes.json"
+        record = json.loads(log.read_text()) if log.exists() else {}
+        record.update({str(e): r for e, r in zip(group["episode_index"], group["reasons"])})
+        log.write_text(json.dumps(record, indent=1))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", required=True, help="dataset root containing bucket dirs (or a single bucket)")
@@ -189,7 +233,10 @@ def main():
     ap.add_argument("--buckets", nargs="*")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--video", action="store_true", help="also decode sampled head frames")
-    ap.add_argument("--apply", action="store_true", help="write meta/excluded_episodes.json")
+    ap.add_argument("--quality", help="reuse an existing quality.parquet instead of rescanning")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="write meta/excluded_episodes.json")
+    mode.add_argument("--delete", action="store_true", help="physically remove flagged episodes (converter layout only)")
     ap.add_argument("--min-seconds", type=float, default=2.0)
     ap.add_argument("--max-len-x-median", type=float, default=5.0)
     ap.add_argument("--max-step-m", type=float, default=0.10)
@@ -205,9 +252,13 @@ def main():
         root, buckets = root.parent, [root.name]
     else:
         buckets = a.buckets or sorted(p.name for p in root.iterdir() if (p / "meta" / "info.json").is_file())
-    with ProcessPoolExecutor(a.workers) as pool:
-        futs = {b: pool.submit(scan_bucket, str(root / b), a.video) for b in buckets}
-        df = pd.concat([f.result() for f in futs.values()], ignore_index=True)
+    if a.quality:
+        df = pd.read_parquet(a.quality).drop(columns="reasons", errors="ignore")
+        df = df[df["bucket"].isin(buckets)].reset_index(drop=True)
+    else:
+        with ProcessPoolExecutor(a.workers) as pool:
+            futs = {b: pool.submit(scan_bucket, str(root / b), a.video) for b in buckets}
+            df = pd.concat([f.result() for f in futs.values()], ignore_index=True)
     fps = {b: float(parse_info_json(root / b)["fps"]) for b in buckets}
     df["reasons"] = flag(df, a, fps)
 
@@ -222,12 +273,14 @@ def main():
         "frames_total": int(df["length"].sum()),
         "by_reason": hits[hits != ""].value_counts().to_dict(),
         "thresholds": {k: v for k, v in vars(a).items() if k.startswith(("min_", "max_"))},
-        "applied": a.apply,
+        "applied": "delete" if a.delete else a.apply,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
     if a.apply:
         apply_exclusions(root, df)
+    if a.delete:
+        delete_episodes(root, df)
 
 
 if __name__ == "__main__":

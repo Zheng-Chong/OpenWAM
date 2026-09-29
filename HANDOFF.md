@@ -47,6 +47,12 @@
 - 重转后：213 个 bucket、156,304 条、2578.5 小时，其中灵巧手 19 个（5851 条，读取器实测每只手 9 维位姿 + 6 维手指被监督）。仍有 60 个任务缺 10,624 条，等 HF 下载完成。
 - 重新扫描（`/root/agibot_quality_v2/`，未 apply）：标出 2910 条（1.9%），`pos_jump` 2873、`rot_jump` 57；灵巧手只标出 18 条。
 
+### 2026-09-29 删除不合格 episode 并写入 OSS
+- 用户决定直接删除：`episode_quality --quality <已有 quality.parquet> --delete` 物理删除 2910 条（data 文件、视频链接、episodes 行，更新 info 总数；原因记在各 bucket 的 `meta/deleted_episodes.json`）。725（Scan security check，952 条）和 748（104 条）被删空，整个 bucket 移除，记录在根目录 `deleted_buckets.json`。删除前的 meta 备份：dsw-2 `/root/agibot_lerobotv3_meta_backup_20260929.tar`。
+- 删除后：211 个 bucket、153,394 条、2521.4 小时。
+- 复制到 OSS：`/mnt/data/datasets/AgiBot/AgiBotWorld-Beta-lerobotv3`（`rsync -rL` 解引用软链，视频约 8.5 TB 实体复制；脚本 dsw-2 `/root/owam_conv2/copy_to_oss.sh`，日志 `/root/openwam_g1_logs/agibot_copy_oss.log`）。
+- 注意：2026-09-29 15:25 有人把原始数据从 `/mnt/data/datasets/agibot_world_beta` 移到 `/mnt/data/datasets/AgiBot/agibot_world_beta`；`agibot_world_beta_extracted` 仍在旧位置（本地数据集的软链指向它）。补下载仍写入旧路径，需与用户确认后迁移。
+
 ### 涉及范围
 - `openwam/dataloader/utils/agibotworld_convert.py`、`openwam/dataloader/utils/episode_quality.py`（新增）。
 - `tests/dataloader/test_agibotworld_convert.py`（原始 → bucket → `AgiBotWorldDataset` 往返）、`tests/dataloader/test_episode_quality.py`。
@@ -72,7 +78,7 @@
 ## 剩余事项与风险
 
 - AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
-- AgiBot：请用户决定是否 `--apply` 当前清洗结果（2.3%，含 725 / 748 整任务）；可选改为修复单帧 z 尖峰而不是丢弃。apply 后必须重新生成 `stats_g2a.json`（读取器会校验排除后的样本集合）。
+- AgiBot：（已决定删除，已执行）原清洗决策记录：是否 `--apply` 当前清洗结果（2.3%，含 725 / 748 整任务）；可选改为修复单帧 z 尖峰而不是丢弃。apply 后必须重新生成 `stats_g2a.json`（读取器会校验排除后的样本集合）。
 - AgiBot：提取完成后对不完整任务（conversion_report 中 `episodes + skipped < task_info_episodes`）加 `--overwrite` 重转；灵巧手任务（`_DEX_BUCKET_IDS`）的转换分支未经真实数据验证。
 - AgiBot：还没生成 `stats_g2a.json`，也没用它训练过；首尾静止帧未裁（无 `segment_flag`）；基于 VLM 的指令一致性 / 成功判断未做。
 
@@ -96,6 +102,7 @@
 ## 最近历史
 
 - 2026-09-29：G1D 自采数据转成 torso-EEF（URDF 正运动学，官方数据上误差 0），新增 `g1d_self` 读取器；准备后训练。
+- 2026-09-29：`episode_quality` 新增 `--quality`（复用结果）和 `--delete`（物理删除，空 bucket 整体移除）；删除 2910 条不合格 episode，开始复制到 OSS。
 - 2026-09-29：从 HF 补下载 AgiBot 缺失 tar 并补提取；转换支持灵巧手鱼眼腕部相机，报告按任务合并；重转 213 个任务并重新扫描。
 - 2026-09-28：新增 AgiBotWorld-Beta 原始 → LeRobot v3 转换和规则式 episode 质量扫描；全量转换 12.8 万条，扫描标出 2.3%（未 apply）。
 
