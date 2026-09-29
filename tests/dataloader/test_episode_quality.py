@@ -34,6 +34,8 @@ def test_pose_metrics():
 
 def test_prompt_ok():
     assert eq.prompt_ok("Pick the cucumber.")
+    assert eq.prompt_ok("丢垃圾") and eq.prompt_ok("使用键盘打字：I am a robot.")
+    assert not eq.prompt_ok("丢")
     for bad in ("", "  ", "N/A", "task", "do something", "123", "go"):
         assert not eq.prompt_ok(bad), bad
 
@@ -47,17 +49,18 @@ def test_flag_and_apply(tmp_path):
         {**base, "episode_index": 2, "length": 300, "max_step_m": 0.2},
         {**base, "episode_index": 3, "length": 300, "path_m": 0.0, "effector_range": 0.0},
         {**base, "episode_index": 4, "length": 300, "prompt_ok": False},
-    ])
+        {**base, "episode_index": 5, "length": 300, "zero_pose_frames": 3},
+    ]).fillna({"zero_pose_frames": 0})
     a = argparse.Namespace(min_seconds=2.0, max_len_x_median=5.0, max_step_m=0.05, max_step_deg=20.0,
                            min_path_m=0.05, min_effector_range=0.05)
     df["reasons"] = eq.flag(df, a, {"b": 30.0})
-    assert df["reasons"].tolist() == ["", "too_short", "pos_jump", "static", "bad_prompt"]
+    assert df["reasons"].tolist() == ["", "too_short", "pos_jump", "static", "bad_prompt", "zero_pose"]
 
     meta = tmp_path / "b" / "meta"
     meta.mkdir(parents=True)
     (meta / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [9]}))
     eq.apply_exclusions(tmp_path, df)
-    assert load_excluded_episodes_snapshot(tmp_path / "b").episode_indices == (1, 2, 3, 4, 9)
+    assert load_excluded_episodes_snapshot(tmp_path / "b").episode_indices == (1, 2, 3, 4, 5, 9)
     assert json.loads((meta / "excluded_episodes.json").read_text())["episode_quality"]["3"] == "static"
 
 

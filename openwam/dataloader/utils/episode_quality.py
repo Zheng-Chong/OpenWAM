@@ -11,6 +11,8 @@ Rules (thresholds are CLI flags; inspect ``quality.parquet`` before applying):
 
 * ``too_short`` / ``too_long``   length < ``--min-seconds`` or > ``--max-len-x-median`` × bucket median
 * ``nonfinite``                  NaN/inf in a pose / effector column
+* ``zero_pose``                  any frame with an arm at exactly xyz = 0 (tracking loss)
+* ``bad_image``                  converter replaced undecodable source frames (``bad_image_frames``)
 * ``pos_jump``                   per-step EEF xyz move > ``--max-step-m``
 * ``rot_jump``                   per-step EEF rotation > ``--max-step-deg``
 * ``invalid_rot6d``              rot6d columns far from orthonormal
@@ -80,7 +82,8 @@ def pose_metrics(pose: np.ndarray) -> dict:
 
 def prompt_ok(text: str) -> bool:
     text = (text or "").strip()
-    return len(re.findall(r"[^\W\d_]{2,}", text)) >= 2 and not PLACEHOLDER.match(text)
+    words = len(re.findall(r"[A-Za-z]{2,}", text)) + len(re.findall(r"[\u4e00-\u9fff]", text))  # CJK: per character
+    return words >= 2 and not PLACEHOLDER.match(text)
 
 
 def video_metrics(path: Path, t0: float, t1: float, samples: int) -> dict:
@@ -115,7 +118,9 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
     info = parse_info_json(root)
     eps = load_episodes_parquet(root)
     eps["_row"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
-    vcol = (f"videos/{HEAD_CAMERA}/chunk_index", f"videos/{HEAD_CAMERA}/file_index")
+    cams = [c.split("/")[1] for c in eps.columns if c.startswith("videos/") and c.endswith("/chunk_index")]
+    head = HEAD_CAMERA if HEAD_CAMERA in cams else (cams[0] if cams else HEAD_CAMERA)  # e.g. Hy: cam_high
+    vcol = (f"videos/{head}/chunk_index", f"videos/{head}/file_index")
     tasks = pd.read_parquet(root / "meta" / "tasks.parquet")
     task_text = dict(zip(tasks["task_index"], tasks.index))
 
@@ -128,19 +133,21 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
         for _, ep in group.iterrows():
             n, start = int(ep["length"]), int(ep["_row"])
             win = table.slice(start, n)
-            r = {"bucket": root.name, "episode_index": int(ep["episode_index"]), "length": n}
+            r = {"bucket": root.name, "episode_index": int(ep["episode_index"]), "length": n,
+                 "bad_image_frames": int(ep.get("bad_image_frames", 0))}  # set by converters that patch frames
             pose = np.stack(win[POSE_COL].to_numpy(zero_copy_only=False)).astype(np.float64)
             eff = [np.stack(win[c].to_numpy(zero_copy_only=False)).astype(np.float64) for c in EFFECTOR_COLS if c in cols]
             r["nonfinite"] = not (np.isfinite(pose).all() and all(np.isfinite(e).all() for e in eff))
+            r["zero_pose_frames"] = int(sum((np.abs(pose[:, xyz]).sum(1) == 0).sum() for xyz, _ in ARMS))
             r.update(pose_metrics(np.nan_to_num(pose)) if not r["nonfinite"] else {})
             r["effector_range"] = float(max((np.ptp(e, axis=0).max() for e in eff), default=0.0))
             r["prompt_ok"] = all(prompt_ok(task_text.get(int(t), "")) for t in set(win["task_index"].to_pylist()))
             if video and vcol[0] in eps.columns:
                 vpath = root / info["video_path"].format(
-                    video_key=HEAD_CAMERA, chunk_index=int(ep[vcol[0]]), file_index=int(ep[vcol[1]])
+                    video_key=head, chunk_index=int(ep[vcol[0]]), file_index=int(ep[vcol[1]])
                 )
-                t0 = float(ep.get(f"videos/{HEAD_CAMERA}/from_timestamp", 0.0))
-                t1 = float(ep.get(f"videos/{HEAD_CAMERA}/to_timestamp", np.inf))
+                t0 = float(ep.get(f"videos/{head}/from_timestamp", 0.0))
+                t1 = float(ep.get(f"videos/{head}/to_timestamp", np.inf))
                 r.update(video_metrics(vpath, t0, t1, video_samples))
             rows.append(r)
     return pd.DataFrame(rows)
@@ -154,6 +161,8 @@ def flag(df: pd.DataFrame, a: argparse.Namespace, fps_by_bucket: dict[str, float
         "too_short": df["length"] < a.min_seconds * fps,
         "too_long": df["length"] > a.max_len_x_median * median,
         "nonfinite": df["nonfinite"],
+        "zero_pose": df["zero_pose_frames"] > 0 if "zero_pose_frames" in df else pd.Series(False, index=df.index),
+        "bad_image": df["bad_image_frames"] > 0 if "bad_image_frames" in df else pd.Series(False, index=df.index),
         "pos_jump": df["max_step_m"] > a.max_step_m,
         "rot_jump": df["max_step_deg"] > a.max_step_deg,
         "invalid_rot6d": df["rot6d_err"] > 0.05,
