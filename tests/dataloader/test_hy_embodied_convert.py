@@ -13,8 +13,9 @@ def test_episode_columns():
     np.testing.assert_allclose(c["observation.state.ee_base"][:, 0], [0.1, 0.2, 0.3], rtol=1e-6)
     np.testing.assert_allclose(c["action.ee_base"][:, 0], [0.2, 0.3, 0.3], rtol=1e-6)  # next state, last repeated
     np.testing.assert_allclose(c["observation.state.ee_base"][0, 3:9], [1, 0, 0, 0, 1, 0])
-    np.testing.assert_allclose(c["observation.state.gripper"][0], [40, 60])
-    np.testing.assert_allclose(c["action.gripper"][0], [5, 5])
+    np.testing.assert_allclose(c["observation.state.gripper"][0], [1 - 40 / 90, 1 - 60 / 90], rtol=1e-6)
+    np.testing.assert_allclose(c["action.gripper"][0], [1 - 5 / 90] * 2, rtol=1e-6)
+    np.testing.assert_allclose(hy.gripper_open(np.array([0.0, 90.0, 120.0])), [1, 0, 0])  # 90+ saturates closed
 
 
 def test_fill_bad_jpegs():

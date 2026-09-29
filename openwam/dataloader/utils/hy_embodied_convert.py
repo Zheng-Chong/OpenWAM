@@ -17,8 +17,8 @@ Leading unsynced frames (zero pose or 1-byte image; ~17% of episodes start
 with exactly one) are trimmed and counted in ``trimmed_leading_frames``.
 Frames labeled ``__UNKNOWN__`` (gaps between sub-tasks) take the nearest
 labeled task, counted in ``unlabeled_frames``.
-``action.ee_base`` = next state (last row repeated), grippers raw (0..90,
-state and action are distinct source columns). Any remaining zero-pose frames
+``action.ee_base`` = next state (last row repeated), grippers mapped to the
+shared ``[0, 1]`` / 0 = closed / 1 = open convention (source: 0 open .. 90 closed). Any remaining zero-pose frames
 (tracking loss mid-episode) are kept; ``episode_quality``'s ``zero_pose`` rule
 flags them. Remaining placeholder image frames (1-byte entries) are filled from the
 nearest valid frame to keep alignment and counted in the episodes table
@@ -60,13 +60,21 @@ def state_to_ee18(state: np.ndarray) -> np.ndarray:
     return np.concatenate(arms, axis=-1).astype(np.float32)
 
 
+GRIP_CLOSED_RAW = 90.0  # source grip: 0 = fully open, 90 = fully closed (checked on wrist images)
+
+
+def gripper_open(raw: np.ndarray) -> np.ndarray:
+    """Source grip value → shared convention: [0, 1], 0 = closed, 1 = open."""
+    return (1.0 - np.clip(np.asarray(raw, dtype=np.float64) / GRIP_CLOSED_RAW, 0.0, 1.0)).astype(np.float32)
+
+
 def episode_columns(state: np.ndarray, action: np.ndarray) -> dict[str, np.ndarray]:
     ee = state_to_ee18(state)
     return {
         "observation.state.ee_base": ee,
         "action.ee_base": np.concatenate([ee[1:], ee[-1:]], axis=0),
-        "observation.state.gripper": state[:, [7, 15]].astype(np.float32),
-        "action.gripper": action.astype(np.float32),
+        "observation.state.gripper": gripper_open(state[:, [7, 15]]),
+        "action.gripper": gripper_open(action),
     }
 
 
@@ -241,6 +249,8 @@ def convert_table(root: Path, table: str, out_root: Path, workers: int, crf: int
         "video_path": VIDEO_PATH,
         "features": features,
         "pose_frame": "absolute UMI/motion-capture frame (no robot base)",
+        "gripper": {"convention": "0_closed_1_open", "raw_range": [0.0, GRIP_CLOSED_RAW],
+                    "raw_semantics": "0_open_90_closed", "transform": "1-clip(x/90,0,1)"},  # fmt: skip
     }
     (meta / "info.json").write_text(json.dumps(info, indent=2, ensure_ascii=False))
     return {"table": table, "status": "ok", "episodes": len(rows), "frames": frames,
