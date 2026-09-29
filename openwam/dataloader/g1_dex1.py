@@ -272,12 +272,39 @@ class MultiG1Dex1Dataset(MultiLeRobotV3Reader):
         return self._buckets[0].normalization_stats_path
 
 
+class G1DSelfDataset(G1Dex1Dataset):
+    """Self-collected G1-Dex1 buckets after ``utils/g1d_self_convert.py``.
+
+    Same torso-EEF schema and stats contract as the official data; only the
+    camera keys differ, and videos are shared in place with the source (trimmed /
+    filtered episodes), so frame offsets come from ``from_timestamp`` instead of
+    the cumulative episode lengths.
+    """
+
+    DATASET_NAME = "G1DSelf"
+    HEAD_CAMERA = "observation.images.cam_left_high"
+    LEFT_WRIST_CAMERA = "observation.images.cam_left_wrist"
+    RIGHT_WRIST_CAMERA = "observation.images.cam_right_wrist"
+
+    def _add_episode_offsets(self, eps: pd.DataFrame) -> None:
+        super()._add_episode_offsets(eps)
+        for cam in self._video_cameras():
+            col = f"videos/{cam}/from_timestamp"
+            if col in eps.columns:
+                eps[self._video_offset_col(cam)] = np.round(eps[col].to_numpy() * self._fps).astype(np.int64)
+
+    @classmethod
+    def _multibucket_wrapper(cls):
+        return MultiG1Dex1Dataset
+
+
 ROT6D_DIMS = ROT6D_DIMS_EEF20
 
 __all__ = [
     "ACTION_MODE",
     "EEF20_DIM",
     "GRIPPER_DIMS_EEF20",
+    "G1DSelfDataset",
     "G1Dex1Dataset",
     "MultiG1Dex1Dataset",
     "ROT6D_DIMS",

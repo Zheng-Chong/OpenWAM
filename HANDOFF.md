@@ -1,8 +1,8 @@
 # Project Handoff
 
-更新时间：2026-09-28
+更新时间：2026-09-29
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
-当前目标：G1-Dex1 mid-train 在跑；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
+当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
 ## 项目状态
 
@@ -13,6 +13,8 @@
 - 划分：`episode_index % 50 == 0` 为验证集（约 2%）。
 - 基础模型：`/mnt/data/models/OpenWAM-Alpha-Pretrain-Foundation-Model`（step 154000，24.8 GB）。
 - G1 关键约束：只用 v3.0 躯干系末端位姿任务；统计量 min-max；训练输出必须放本地盘（ossfs 不支持 safetensors 写入）；训练端可开 `training.prompt_embed_cache_size` 缓存 umT5 编码（每步约省 1.2 s）。
+- G1 mid-train 已完成（2026-09-29）：dsw-1 `/root/openwam_g1/runs/2026-09-27_11-35-37/checkpoint_step_20000.safetensors`，6000–20000 步副本在 `/mnt/data/chongzheng/openwam_g1/ckpts/stepN/`。验证集（1300 窗口）位置误差 77.1 mm（基座）→ 27.1 mm（20000 步），旋转 15.3° → 7.8°，夹爪准确率 88% → 97%；各 checkpoint 结果在 dsw-share1 `/root/eval/stepN/summary.json`。
+- G1D 自采数据（`/mnt/data/datasets/G1D-自采数据`）已转成 torso-EEF 格式：`/mnt/data/datasets/G1D-自采数据-eef/`（6 个 bucket，950 条 episode，54.7 万帧），读取器 `g1d_self`（配置 `configs/dataloader/g1d_self.yaml`）。
 - AgiBotWorld-Beta：原始数据 `/mnt/data/datasets/agibot_world_beta`（tar，仍在提取到 `agibot_world_beta_extracted`）；LeRobot v3 转换产物在 dsw-2 本地盘 `/root/AgiBotWorld-Beta-lerobotv3`。
 
 ## 最近任务
@@ -45,13 +47,25 @@
 - 任务 373 真实读取：AV1 解码正常，三视角拼图正确，夹爪闭合为 0，底盘两维被监督（掩码 22 维）。
 - 本机没有 h5py，转换测试在本机会跳过。
 
+### G1D 自采数据后训练（2026-09-29）
+- 目标：用 mid-train 20000 步权重，在自采桌面任务上混合后训练，提高这些任务的成功率。用户决定：不跑 α 基座初始化的对照；所有自采任务混在一起；只要桌面操作。
+- `openwam/dataloader/utils/g1d_self_convert.py`：关节角 → URDF 正运动学（`torso_link → <side>_dex1_base_link`，再沿局部 x 平移 0.0635 m）→ 与官方完全相同的 `*_ee_pose_gripper_torso` 列。在官方 ZipUp / Arrange_Flowers 上核对：位置误差 0.000 mm、旋转误差 0.000°。URDF 放在 `openwam/dataloader/assets/unitree_g1_dex1.urdf`。
+- 夹爪：自采 Dex1 张开约 5.4（每个 episode 开头 5.37–5.38），按 4.5/5.4 缩放到官方刻度，之后沿用 `clip(g/4.5,0,1)*2-1`。
+- 过滤：`is_bad`、底盘 XY 位移 > 1 cm、偏航 > 1°、升降变化 > 1e-3、底盘速度指令 > 0.02 的整条 episode 丢弃；实际只丢了 PourBeans 的 1 条（指令峰值 0.025）。PourBeansEps380 用用户裁掉底盘移动前缀的 `_desk` 版本，原版不转换。
+- 数据格式：A 批（PickKettle 16 维、PourBeans / PourBeansPlus 23 维 FullObs）只有关节角；B 批（capybara、pick_3objects、pick_bottle，可移动升降底盘）有 `arm_pose`，但位置参考点和官方差约 70 mm，统一改用关节角 + 正运动学。B 批关节顺序已用 `arm_pose` 的旋转核对（0.000°）。
+- 指令：没有改写的任务补了 5 条英文改写（`@` 分隔）；PourBeans380 的英文改写原本只在 episodes 表的 `tasks` 列，转换时写进 `tasks.parquet`。
+- 读取器 `G1DSelfDataset`（`g1_dex1.py`）：只换相机名（`cam_left_high` / `cam_left_wrist` / `cam_right_wrist`），视频帧偏移改为 `round(from_timestamp × fps)`，因为视频原地共享、episode 被裁剪 / 过滤后按长度累加会错位。未裁剪的 Kettle 上两种算法结果一致。
+- 统计量沿用 mid-train 的文件，保证动作归一化和 checkpoint 一致；抽样 60 个窗口，没有值超出 [-1, 1]。验证集 `val_every: 10`。
+- 验证：dsw-share1 `pytest tests/dataloader/test_g1d_self_convert.py tests/dataloader/test_g1_dex1.py` → 6 passed（含与官方位姿逐帧对比）；读取器训练 48.8 万 / 验证 5.6 万窗口，视频解码和三视角拼图目检正确。
+
 ## 剩余事项与风险
 
 - AgiBot：请用户决定是否 `--apply` 当前清洗结果（2.3%，含 725 / 748 整任务）；可选改为修复单帧 z 尖峰而不是丢弃。apply 后必须重新生成 `stats_g2a.json`（读取器会校验排除后的样本集合）。
 - AgiBot：提取完成后对不完整任务（conversion_report 中 `episodes + skipped < task_info_episodes`）加 `--overwrite` 重转；灵巧手任务（`_DEX_BUCKET_IDS`）的转换分支未经真实数据验证。
 - AgiBot：还没生成 `stats_g2a.json`，也没用它训练过；首尾静止帧未裁（无 `segment_flag`）；基于 VLM 的指令一致性 / 成功判断未做。
 
-- 正式 mid-train 已于 2026-09-27 在 dsw-1 启动（目标：专门做 G1 的基座，全参）：8 卡、每卡 batch 24、20000 步，video_lr=3e-5 / action_lr=1e-4（cosine 衰减，前 5% warmup），每 2000 步保存，保留最近 3 个；约 8.7 s/步，预计约 48 小时。日志：`/root/openwam_g1_logs/midtrain.log`，输出：`/root/openwam_g1/runs/`（本地盘）。
+- G1 mid-train（2026-09-27 至 09-29，dsw-1，8 卡，每卡 batch 24，20000 步，video_lr=3e-5 / action_lr=1e-4）已完成；step 2000 / 4000 被滚动删除，没有验证点。`keep_last_k_ckpts` 默认已改为 null（全部保留）。
+- G1D 后训练：部署客户端（EEF → IK → 关节）仍未实现，真机成功率要等它做完才能测。
 - 只在 G1 数据上训练，其他本体的能力会退化，这是有意为之。
 - min-max 统计量受位置离群值影响：大部分数据只占 [-1,1] 中间约一半区间。如果精度不理想，可以考虑清洗离群轨迹。
 - `wandb` 在 DSW 上未登录，需设置 `WANDB_MODE=offline`。
@@ -69,6 +83,7 @@
 
 ## 最近历史
 
+- 2026-09-29：G1D 自采数据转成 torso-EEF（URDF 正运动学，官方数据上误差 0），新增 `g1d_self` 读取器；准备后训练。
 - 2026-09-28：新增 AgiBotWorld-Beta 原始 → LeRobot v3 转换和规则式 episode 质量扫描；全量转换 12.8 万条，扫描标出 2.3%（未 apply）。
 
 - 2026-09-27：分析训练速度（瓶颈在计算，不在数据），新增训练端 prompt 编码缓存。

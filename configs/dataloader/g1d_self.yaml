@@ -1,0 +1,38 @@
+# Self-collected G1 + Dex1 tabletop tasks, post-training on top of the G1-Dex1 mid-train.
+# dataset_dir is the output root of
+#   python -m openwam.dataloader.utils.g1d_self_convert --src-root <raw> --out-root <root>
+# which recomputes the torso-frame EEF from arm joints (URDF FK) and filters
+# bad / chassis-moving / lifting episodes. Schema and conventions match g1_dex1.yaml.
+type: g1d_self
+dataset_dir: /path/to/G1D-self-eef
+tasks: null
+exclude_tasks: null
+
+action_mode: eef
+unify_action: true
+unify_action_map: ["0-9", "34-43"]
+unify_state_map: null
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# Small per-task episode counts (52–380): hold out ~10% for offline eval.
+val_every: 10
+
+# cam_left_high + cam_left_wrist + cam_right_wrist L-shape
+height: 384
+width: 320
+multiview: true
+
+# Reuse the mid-train stats file so the action normalization the checkpoint
+# learned is unchanged (same physical EEF20 contract).
+normalize_mode: min-max
+normalization_stats_path: /path/to/g1_dex1_normalization_stats.npy
+
+color_jitter:
+  enabled: true
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
