@@ -50,8 +50,9 @@
 ### 2026-09-29 删除不合格 episode 并写入 OSS
 - 用户决定直接删除：`episode_quality --quality <已有 quality.parquet> --delete` 物理删除 2910 条（data 文件、视频链接、episodes 行，更新 info 总数；原因记在各 bucket 的 `meta/deleted_episodes.json`）。725（Scan security check，952 条）和 748（104 条）被删空，整个 bucket 移除，记录在根目录 `deleted_buckets.json`。删除前的 meta 备份：dsw-2 `/root/agibot_lerobotv3_meta_backup_20260929.tar`。
 - 删除后：211 个 bucket、153,394 条、2521.4 小时。
-- 复制到 OSS：`/mnt/data/datasets/AgiBot/AgiBotWorld-Beta-lerobotv3`（`rsync -rL` 解引用软链，视频约 8.5 TB 实体复制；脚本 dsw-2 `/root/owam_conv2/copy_to_oss.sh`，日志 `/root/openwam_g1_logs/agibot_copy_oss.log`）。
-- 注意：2026-09-29 15:25 有人把原始数据从 `/mnt/data/datasets/agibot_world_beta` 移到 `/mnt/data/datasets/AgiBot/agibot_world_beta`；`agibot_world_beta_extracted` 仍在旧位置（本地数据集的软链指向它）。补下载仍写入旧路径，需与用户确认后迁移。
+- **已复制到 OSS 并核对**：`/mnt/data/datasets/AgiBot/AgiBotWorld-Beta-lerobotv3`，8.48 TB（视频 8.44 TB 实体文件，460,182 个 = 3 × 153,394），读取器取样正常。这是正式版本；dsw-2 本地 `/root/AgiBotWorld-Beta-lerobotv3` 只是工作副本。
+- 复制注意：ossfs 不支持 `ftruncate`，不能用 `rsync --inplace`（errno 95）；用 `rsync -rL --size-only`（脚本 dsw-2 `/root/owam_conv2/copy_to_oss.sh`）。
+- 原始数据路径以 `/mnt/data/datasets/AgiBot/agibot_world_beta` 为准（2026-09-29 由他人迁移）。补下载已改到新路径（搬迁期间写到旧路径的 30 个 tar 已挪过去）；提取输出 `agibot_world_beta_extracted` 仍在旧位置 `/mnt/data/datasets/`（上百万个文件，ossfs 目录改名要逐个对象改，未迁移）。
 
 ### 涉及范围
 - `openwam/dataloader/utils/agibotworld_convert.py`、`openwam/dataloader/utils/episode_quality.py`（新增）。
@@ -102,6 +103,7 @@
 ## 最近历史
 
 - 2026-09-29：G1D 自采数据转成 torso-EEF（URDF 正运动学，官方数据上误差 0），新增 `g1d_self` 读取器；准备后训练。
+- 2026-09-29：AgiBot LeRobot v3 复制到 OSS（8.48 TB）并核对；原始数据路径迁到 `AgiBot/`，补下载随之迁移。
 - 2026-09-29：`episode_quality` 新增 `--quality`（复用结果）和 `--delete`（物理删除，空 bucket 整体移除）；删除 2910 条不合格 episode，开始复制到 OSS。
 - 2026-09-29：从 HF 补下载 AgiBot 缺失 tar 并补提取；转换支持灵巧手鱼眼腕部相机，报告按任务合并；重转 213 个任务并重新扫描。
 - 2026-09-28：新增 AgiBotWorld-Beta 原始 → LeRobot v3 转换和规则式 episode 质量扫描；全量转换 12.8 万条，扫描标出 2.3%（未 apply）。
