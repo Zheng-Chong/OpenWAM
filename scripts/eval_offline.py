@@ -135,6 +135,10 @@ def run(args) -> None:
                 "latency_s": latency,
                 "model": summarize_errors(chunk_errors(pred, gt), valid_steps),
                 "hold": summarize_errors(chunk_errors(hold, gt), valid_steps),
+                # raw EEF20 chunks (physical units) for signed / bias analysis
+                "proprio": np.round(proprio[:20], 5).tolist(),
+                "pred": np.round(pred[:valid_steps, :20], 5).tolist(),
+                "gt": np.round(gt[:valid_steps, :20], 5).tolist(),
             }
             fh.write(json.dumps(record) + "\n")
             fh.flush()
