@@ -14,7 +14,9 @@
 - 基础模型：`/mnt/data/models/OpenWAM-Alpha-Pretrain-Foundation-Model`（step 154000，24.8 GB）。
 - G1 关键约束：只用 v3.0 躯干系末端位姿任务；统计量 min-max；训练输出必须放本地盘（ossfs 不支持 safetensors 写入）；训练端可开 `training.prompt_embed_cache_size` 缓存 umT5 编码（每步约省 1.2 s）。
 - G1 mid-train 已完成（2026-09-29）：dsw-1 `/root/openwam_g1/runs/2026-09-27_11-35-37/checkpoint_step_20000.safetensors`，6000–20000 步副本在 `/mnt/data/chongzheng/openwam_g1/ckpts/stepN/`。验证集（1300 窗口）位置误差 77.1 mm（基座）→ 27.1 mm（20000 步），旋转 15.3° → 7.8°，夹爪准确率 88% → 97%；各 checkpoint 结果在 dsw-share1 `/root/eval/stepN/summary.json`。
-- G1D 自采数据（`/mnt/data/datasets/G1D-自采数据`）已转成 torso-EEF 格式：`/mnt/data/datasets/G1D-自采数据-eef/`（6 个 bucket，950 条 episode，54.7 万帧），读取器 `g1d_self`（配置 `configs/dataloader/g1d_self.yaml`）。
+- G1D 自采数据（`/mnt/data/datasets/G1D-自采数据`）已转成 torso-EEF 格式：`/mnt/data/datasets/G1D-自采数据-eef/`（6 个 bucket，948 条 episode，54.5 万帧），读取器 `g1d_self`（配置 `configs/dataloader/g1d_self.yaml`）。
+- G1D 后训练 2026-09-29 11:02 在 dsw-1 启动：mid-train step 20000 初始化，8 卡 × 每卡 16 × 梯度累积 2 = 全局 256，lr 1e-4（视频 / 动作统一），cosine、5% warmup，prompt 缓存开，`max_steps=20000` / `save_steps=2000`（均按 micro 步计，即 10000 优化器步、约 5.2 epoch），约 5.2 s/micro 步，预计 28.5 小时。输出 `/root/openwam_g1/runs_post/2026-09-29_11-01-56/`，日志 `/root/openwam_g1_logs/posttrain.log`，启动脚本 `/root/openwam_g1/posttrain.sh`。
+- 后训练自动化：dsw-1 `/root/ckpt_sync_post.sh` 复制到 `/mnt/data/chongzheng/openwam_g1/ckpts_post/stepN/`；dsw-share1 `/root/eval_watch_post.sh` 先评估 step 0（mid-train 权重）再评估每个新 checkpoint（每任务 100 个验证窗口），结果 `/root/eval_post/stepN/summary.json`。
 - AgiBotWorld-Beta：原始数据 `/mnt/data/datasets/agibot_world_beta`（tar，仍在提取到 `agibot_world_beta_extracted`）；LeRobot v3 转换产物在 dsw-2 本地盘 `/root/AgiBotWorld-Beta-lerobotv3`。
 
 ## 最近任务
@@ -48,10 +50,11 @@
 - 本机没有 h5py，转换测试在本机会跳过。
 
 ### G1D 自采数据后训练（2026-09-29）
+- 排查记录：第一次后训练 debug 在第 6 步 NCCL all-reduce 超时。原因是 rank 4 读到视频被截断的 episode，`_safe_get` 重试用完后抛错；非 0 号 rank 的调用栈又被 `scripts/train.py` 吞掉（`builtins.print` 在非主 rank 是空函数，`traceback.print_exc` 走的是 print），已改成 `sys.stderr.write(format_exc())`。Hydra 命令行里的中文路径要加引号：`"dataloader.dataset_dir='/mnt/.../G1D-自采数据-eef'"`。
 - 目标：用 mid-train 20000 步权重，在自采桌面任务上混合后训练，提高这些任务的成功率。用户决定：不跑 α 基座初始化的对照；所有自采任务混在一起；只要桌面操作。
 - `openwam/dataloader/utils/g1d_self_convert.py`：关节角 → URDF 正运动学（`torso_link → <side>_dex1_base_link`，再沿局部 x 平移 0.0635 m）→ 与官方完全相同的 `*_ee_pose_gripper_torso` 列。在官方 ZipUp / Arrange_Flowers 上核对：位置误差 0.000 mm、旋转误差 0.000°。URDF 放在 `openwam/dataloader/assets/unitree_g1_dex1.urdf`。
 - 夹爪：自采 Dex1 张开约 5.4（每个 episode 开头 5.37–5.38），按 4.5/5.4 缩放到官方刻度，之后沿用 `clip(g/4.5,0,1)*2-1`。
-- 过滤：`is_bad`、底盘 XY 位移 > 1 cm、偏航 > 1°、升降变化 > 1e-3、底盘速度指令 > 0.02 的整条 episode 丢弃；实际只丢了 PourBeans 的 1 条（指令峰值 0.025）。PourBeansEps380 用用户裁掉底盘移动前缀的 `_desk` 版本，原版不转换。
+- 过滤：`is_bad`、底盘 XY 位移 > 1 cm、偏航 > 1°、升降变化 > 1e-3、底盘速度指令 > 0.02、数据长度超过任一相机 mp4 实际帧数的整条 episode 丢弃；实际丢了 PourBeans 1 条（指令峰值 0.025）和 PourBeansPlus 2 条（episode 4、50 的视频文件被截断，元数据的 to_timestamp 不可信，要读 mp4 本身）。PourBeansEps380 用用户裁掉底盘移动前缀的 `_desk` 版本，原版不转换。
 - 数据格式：A 批（PickKettle 16 维、PourBeans / PourBeansPlus 23 维 FullObs）只有关节角；B 批（capybara、pick_3objects、pick_bottle，可移动升降底盘）有 `arm_pose`，但位置参考点和官方差约 70 mm，统一改用关节角 + 正运动学。B 批关节顺序已用 `arm_pose` 的旋转核对（0.000°）。
 - 指令：没有改写的任务补了 5 条英文改写（`@` 分隔）；PourBeans380 的英文改写原本只在 episodes 表的 `tasks` 列，转换时写进 `tasks.parquet`。
 - 读取器 `G1DSelfDataset`（`g1_dex1.py`）：只换相机名（`cam_left_high` / `cam_left_wrist` / `cam_right_wrist`），视频帧偏移改为 `round(from_timestamp × fps)`，因为视频原地共享、episode 被裁剪 / 过滤后按长度累加会错位。未裁剪的 Kettle 上两种算法结果一致。

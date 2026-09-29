@@ -16,7 +16,8 @@ so raw values are rescaled by 4.5/5.4 onto the official scale; the reader's
 ``clip(g/4.5,0,1)*2-1`` then applies unchanged.
 
 Episodes are dropped when marked bad or when the chassis moves / the lift changes
-(tabletop-only post-training). Only parquet + meta are written; videos are
+(tabletop-only post-training), or when the data runs past the end of a video
+(truncated recording). Only parquet + meta are written; videos are
 referenced in place through an absolute ``video_path`` and per-episode
 ``from_timestamp`` (the reader derives frame offsets from it).
 
@@ -173,6 +174,22 @@ def episode_is_tabletop(ep: pd.DataFrame, schema: str) -> tuple[bool, str]:
     return True, ""
 
 
+def episodes_past_video_end(eps: pd.DataFrame, video_path: str, fps: float) -> set:
+    """Episodes whose data rows run past the end of any camera's mp4 (truncated recordings)."""
+    import av
+
+    short = set()
+    for col in [c for c in eps.columns if c.startswith("videos/") and c.endswith("/from_timestamp")]:
+        cam = col.split("/")[1]
+        for (chunk, file), g in eps.groupby([f"videos/{cam}/chunk_index", f"videos/{cam}/file_index"]):
+            with av.open(video_path.format(video_key=cam, chunk_index=chunk, file_index=file)) as container:
+                s = container.streams.video[0]
+                n = s.frames or int(round(float(s.duration * s.time_base) * fps))
+            end = np.round(g[col].to_numpy() * fps).astype(int) + g["length"].to_numpy()
+            short.update(int(e) for e in g["episode_index"].to_numpy()[end > n])
+    return short
+
+
 def _task_text(text: str) -> str:
     if "@" in text:
         return text
@@ -200,9 +217,12 @@ def convert_bucket(src: Path, out: Path, schema: str, fk: G1ArmFK) -> dict:
         data["task_index"] = data["episode_index"].map(ep_task)
         idx_to_text = dict(enumerate(texts))
 
+    video_path = Path(info["video_path"]) if Path(info["video_path"]).is_absolute() else (src / info["video_path"]).resolve()
+    short_video = episodes_past_video_end(eps, str(video_path), float(info["fps"]))
+
     kept, dropped, frames = [], {}, []
     for e, ep in data.groupby("episode_index", sort=True):
-        ok, why = episode_is_tabletop(ep, schema)
+        ok, why = (False, "video_short") if int(e) in short_video else episode_is_tabletop(ep, schema)
         if not ok:
             dropped[why] = dropped.get(why, 0) + 1
             continue
@@ -236,7 +256,6 @@ def convert_bucket(src: Path, out: Path, schema: str, fk: G1ArmFK) -> dict:
         out / "meta" / "tasks.parquet"
     )
 
-    video_path = Path(info["video_path"]) if Path(info["video_path"]).is_absolute() else (src / info["video_path"]).resolve()
     image_features = {k: v for k, v in info["features"].items() if "images" in k}
     if not image_features:  # _desk trim drops image features; take them from the source it points at
         orig = Path(str(video_path).split("/videos/")[0])

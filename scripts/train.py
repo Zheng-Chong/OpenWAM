@@ -176,7 +176,8 @@ def main(cfg: DictConfig) -> None:
 
         rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
         sys.stderr.write(f"\n===== RANK {rank} EXCEPTION (pre-destroy) =====\n")
-        _tb.print_exc(file=sys.stderr)
+        # format_exc + write: print_exc goes through builtins.print, which is a no-op on non-main ranks.
+        sys.stderr.write(_tb.format_exc())
         sys.stderr.flush()
         sys.stdout.flush()
         raise
