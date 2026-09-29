@@ -39,6 +39,14 @@
 - 跳变阈值由 5 cm/帧放宽到 10 cm/帧：在任务 373 上，5 cm 标出的都是正常分布尾部的快速动作。
 - 位置跳变的成因：左右臂同一帧沿 z 平移相同距离、x/y 不变，推断是升降腰高度信号跳变（707/764 为单帧尖峰，725 为 0.5 m 阶跃）。725（Scan security check）和 748 两个任务 100% 被标出，整任务剔除会损失场景，所以先不 apply，等用户决定。
 
+### 2026-09-29 补数据与重转
+- 本地原始数据当初来自 ModelScope 镜像 `agibot_world/agibot_world_beta`（1121 个 tar），它比 HF 少 112 个 tar，另有 4 个是 136 字节的占位文件、3 个和 HF 版本不同，所以本地缺数据。缺的部分只能从 HF 补：用 `/mnt/data/chongzheng/agibot_beta_fetch/agibot_beta_fetch.py`（不进仓库），token 在 dsw-2 的 `~/.cache/huggingface/token`，走 hf-mirror。
+- 第一轮提取发现很多已下载的 tar 当初没提取完，已补齐（这轮顺带提出了 5 路鱼眼视频，多占空间但无害）。
+- 灵巧手机器人只有鱼眼腕部相机（960×768）：转换脚本改为腕部相机按候选列表取第一个存在的文件；提取白名单也包含鱼眼腕部。
+- 转换报告改为按任务合并（之前单任务重跑会覆盖全量报告）。
+- 重转后：213 个 bucket、156,304 条、2578.5 小时，其中灵巧手 19 个（5851 条，读取器实测每只手 9 维位姿 + 6 维手指被监督）。仍有 60 个任务缺 10,624 条，等 HF 下载完成。
+- 重新扫描（`/root/agibot_quality_v2/`，未 apply）：标出 2910 条（1.9%），`pos_jump` 2873、`rot_jump` 57；灵巧手只标出 18 条。
+
 ### 涉及范围
 - `openwam/dataloader/utils/agibotworld_convert.py`、`openwam/dataloader/utils/episode_quality.py`（新增）。
 - `tests/dataloader/test_agibotworld_convert.py`（原始 → bucket → `AgiBotWorldDataset` 往返）、`tests/dataloader/test_episode_quality.py`。
@@ -63,6 +71,7 @@
 
 ## 剩余事项与风险
 
+- AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
 - AgiBot：请用户决定是否 `--apply` 当前清洗结果（2.3%，含 725 / 748 整任务）；可选改为修复单帧 z 尖峰而不是丢弃。apply 后必须重新生成 `stats_g2a.json`（读取器会校验排除后的样本集合）。
 - AgiBot：提取完成后对不完整任务（conversion_report 中 `episodes + skipped < task_info_episodes`）加 `--overwrite` 重转；灵巧手任务（`_DEX_BUCKET_IDS`）的转换分支未经真实数据验证。
 - AgiBot：还没生成 `stats_g2a.json`，也没用它训练过；首尾静止帧未裁（无 `segment_flag`）；基于 VLM 的指令一致性 / 成功判断未做。
@@ -87,6 +96,7 @@
 ## 最近历史
 
 - 2026-09-29：G1D 自采数据转成 torso-EEF（URDF 正运动学，官方数据上误差 0），新增 `g1d_self` 读取器；准备后训练。
+- 2026-09-29：从 HF 补下载 AgiBot 缺失 tar 并补提取；转换支持灵巧手鱼眼腕部相机，报告按任务合并；重转 213 个任务并重新扫描。
 - 2026-09-28：新增 AgiBotWorld-Beta 原始 → LeRobot v3 转换和规则式 episode 质量扫描；全量转换 12.8 万条，扫描标出 2.3%（未 apply）。
 
 - 2026-09-27：分析训练速度（瓶颈在计算，不在数据），新增训练端 prompt 编码缓存。

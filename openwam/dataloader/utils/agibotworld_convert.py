@@ -18,7 +18,7 @@ flange pose (quat xyzw → rot6d); ``action.ee_base`` is next-state relabeled
 ``robot_velocity`` is ``[vx, 0, yaw]`` (state has no source → zeros).
 Per-frame prompts use the ``label_info`` sub-task text, else ``task_name``.
 
-Episodes missing any of h5 / 3 videos / task_info, or whose video frame count
+Episodes missing any of h5 / 3 videos (dex wrists: fisheye) / task_info, or whose video frame count
 differs from the h5 length, are skipped and reported. ``meta/info.json`` is
 written last, so a bucket without it is incomplete; reruns skip finished
 buckets unless ``--overwrite``.
@@ -44,10 +44,12 @@ import pandas as pd
 from openwam.dataloader.utils.eef import quat_xyzw_to_rot6d
 
 FPS = 30
+# Candidate source files per camera, first existing wins. Dex-hand robots only
+# ship fisheye wrist cameras (960x768), gripper robots the pinhole ones.
 CAMS = {
-    "observation.images.head": "head_color.mp4",
-    "observation.images.hand_left": "hand_left_color.mp4",
-    "observation.images.hand_right": "hand_right_color.mp4",
+    "observation.images.head": ("head_color.mp4",),
+    "observation.images.hand_left": ("hand_left_color.mp4", "hand_left_fisheye_color.mp4"),
+    "observation.images.hand_right": ("hand_right_color.mp4", "hand_right_fisheye_color.mp4"),
 }
 DATA_PATH = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
 VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
@@ -115,14 +117,15 @@ def _video_frames(path: Path) -> int:
 
 
 def _load_episode(raw: Path, task: str, ep: str, info: dict):
-    """Return ``(cols, prompts)`` or a skip-reason string."""
+    """Return ``(cols, prompts, {camera: source file})`` or a skip-reason string."""
     import h5py
 
     vdir = raw / "observations" / task / ep / "videos"
     h5_path = raw / "proprio_stats" / task / ep / "proprio_stats.h5"
     if not h5_path.is_file():
         return "missing_h5"
-    if not all((vdir / f).is_file() for f in CAMS.values()):
+    srcs = {k: next((f for f in names if (vdir / f).is_file()), None) for k, names in CAMS.items()}
+    if None in srcs.values():
         return "missing_video"
     try:
         with h5py.File(h5_path, "r") as h5:
@@ -131,12 +134,12 @@ def _load_episode(raw: Path, task: str, ep: str, info: dict):
         return f"bad_h5:{type(e).__name__}"
     n = len(cols["observation.state.ee_base"])
     try:
-        frames = {_video_frames(vdir / f) for f in CAMS.values()}
+        frames = {_video_frames(vdir / f) for f in srcs.values()}
     except Exception as e:  # noqa: BLE001 - any decode failure skips the episode
         return f"bad_video:{type(e).__name__}"
     if frames != {n}:
         return "video_len_mismatch"
-    return cols, frame_prompts(info, n)
+    return cols, frame_prompts(info, n), srcs
 
 
 def _stats_block(x: np.ndarray) -> dict:
@@ -171,7 +174,7 @@ def convert_task(raw: str, task_info_dir: str, out: str, task: str, overwrite: b
         if isinstance(loaded, str):
             skipped[loaded] = skipped.get(loaded, 0) + 1
             continue
-        cols, prompts = loaded
+        cols, prompts, srcs = loaded
         n = len(prompts)
         seq = len(ep_rows)
         chunk, file = divmod(seq, FILES_PER_CHUNK)
@@ -195,7 +198,7 @@ def convert_task(raw: str, task_info_dir: str, out: str, task: str, overwrite: b
             "data/chunk_index": chunk,
             "data/file_index": file,
         }
-        for key, fname in CAMS.items():
+        for key, fname in srcs.items():
             dst = out_p / VIDEO_PATH.format(video_key=key, chunk_index=chunk, file_index=file)
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.symlink((raw_p / "observations" / task / ep / "videos" / fname).resolve(), dst)
@@ -236,7 +239,7 @@ def convert_task(raw: str, task_info_dir: str, out: str, task: str, overwrite: b
     features = {k: {"dtype": "float32", "shape": [d]} for k, d in feats.items()}
     features.update({k: {"dtype": "int64", "shape": [1]} for k in ("task_index", "episode_index", "frame_index", "index")})
     features["timestamp"] = {"dtype": "float32", "shape": [1]}
-    features.update({k: {"dtype": "video", "shape": [480, 640, 3], "info": {"video.codec": "av1"}} for k in CAMS})
+    features.update({k: {"dtype": "video", "info": {"video.codec": "av1", "source": f}} for k, f in srcs.items()})
     info = {
         "codebase_version": "v3.0",
         "robot_type": "agibot_g1",
@@ -284,7 +287,11 @@ def main():
             r = f.result()
             report.append(r)
             print(json.dumps(r, ensure_ascii=False), flush=True)
-    (Path(args.out) / "conversion_report.jsonl").write_text("".join(json.dumps(r) + "\n" for r in report))
+    # merge by task so a partial rerun (--tasks) keeps the other tasks' rows
+    path = Path(args.out) / "conversion_report.jsonl"
+    merged = {r["task"]: r for r in map(json.loads, path.read_text().splitlines())} if path.exists() else {}
+    merged.update({r["task"]: r for r in report if r["status"] != "exists"})
+    path.write_text("".join(json.dumps(merged[t]) + "\n" for t in sorted(merged, key=int)))
 
 
 if __name__ == "__main__":

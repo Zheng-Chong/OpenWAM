@@ -35,8 +35,8 @@ def _write_raw(root):
         f["timestamp"] = np.arange(N, dtype=np.int64)
     vdir = root / "raw" / "observations" / TASK / EP / "videos"
     vdir.mkdir(parents=True)
-    for name in conv.CAMS.values():
-        (vdir / name).write_bytes(b"")
+    for names in conv.CAMS.values():
+        (vdir / names[-1]).write_bytes(b"")  # fisheye wrists, as on dex robots
     info_dir = root / "task_info"
     info_dir.mkdir()
     info = [
