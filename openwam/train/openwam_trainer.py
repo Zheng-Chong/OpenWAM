@@ -222,6 +222,19 @@ class OpenWAMTrainer:
         else:
             total_opt_steps = max_opt_steps
         scheduler = self.build_lr_scheduler(optimizer, total_opt_steps, debug=debug)
+        # Warm-start continuation of an interrupted run whose optimizer state was not saved:
+        # start the step counters at start_step (micro-steps) and fast-forward the LR schedule
+        # to match, so LR, checkpoint numbering and max_steps line up with the original run.
+        start_step = int(cfg_get(t, "start_step", 0) or 0)
+        if start_step and resume_path:
+            raise ValueError("training.start_step is for finetune warm starts; resume_ckpt_path restores its own step")
+        if start_step and scheduler is not None:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # "scheduler.step() before optimizer.step()"
+                for _ in range((start_step // grad_accum) * self.accelerator.num_processes):
+                    scheduler.step()
 
         if debug:
             save_steps = save_steps_override
@@ -266,8 +279,8 @@ class OpenWAMTrainer:
 
         import time as _time
 
-        opt_step = 0
-        global_step = 0
+        opt_step = start_step // grad_accum
+        global_step = start_step
         start_epoch = 0
         skip_first = 0
 

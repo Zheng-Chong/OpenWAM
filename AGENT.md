@@ -46,6 +46,7 @@ python3 -m pytest -q tests/dataloader/test_g1_dex1.py tests/test_eval_offline.py
 - 只用 SSH 别名（`dsw-1` 等）。**不要在仓库、日志、HANDOFF、Notion 里写主机、IP、端口、用户、密钥路径。**
 - 不在服务器上做 git 操作，代码按已跟踪文件清单 rsync 到隔离目录。
 - 训练输出放本地盘 `/root/...`（ossfs 上存 safetensors 会失败）；checkpoint 另外复制一份到 `/mnt/data/chongzheng/openwam_g1/ckpts/`。
+- 训练/评估读的数据（parquet、视频）和 checkpoint 权重不能直接从 OSS（`/mnt/data`，ossfs）读，先复制到本机本地盘（如 `/root/g1d_data/`、`/root/ckpts/`），`info.json` 里 `video_path` 等绝对路径同步改成本地路径（2026-09-29 G1D 后训练在 dsw-1 跑到 micro 第 6483 步时 ossfs 掉线 `传输端点尚未连接`，读视频失败导致训练退出）。OSS 只做跨机持久副本（顺序 `cp`/`rsync`），每台机器首次使用时复制一次。
 - 长任务用 `setsid nohup ... & disown` 起。
 - 不碰别人的进程；不重启正在跑的训练，除非用户明确同意。
 
