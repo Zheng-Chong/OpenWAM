@@ -229,7 +229,8 @@ class OpenWAMTrainer:
             save_steps = getattr(t, "save_steps", None)
             if save_steps is not None:
                 save_steps = int(save_steps)
-        keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
+        keep_last_k = getattr(t, "keep_last_k_ckpts", None)
+        keep_last_k = int(keep_last_k) if keep_last_k else None  # None/0 = keep every checkpoint
         save_full_states_for_resume = bool(getattr(t, "save_full_states_for_resume", False))
 
         # Finetune warm-start weights were already loaded at architecture

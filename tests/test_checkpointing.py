@@ -319,3 +319,14 @@ def test_setup_output_dir_verifies_stats_before_reusing_resume_run(tmp_path, mon
     assert output_path == str(run_dir)
     assert resume_state_dir == str(state_dir)
     assert calls == [(str(run_dir), trainer.dataset)]
+
+
+def test_keep_last_k_none_keeps_every_weight(tmp_path):
+    for s in (100, 200, 300):
+        (tmp_path / f"checkpoint_step_{s}.safetensors").write_text("x")
+        _make_accel_state(tmp_path, s, marker=True)
+    manage_checkpoints(str(tmp_path), keep_last_k=None)
+    assert len(list(tmp_path.glob("checkpoint_step_*"))) == 3
+    finalize_keep_weights_only(str(tmp_path), keep_last_k=None)
+    remaining = sorted(p.name for p in tmp_path.iterdir())
+    assert remaining == [f"checkpoint_step_{s}.safetensors" for s in (100, 200, 300)]

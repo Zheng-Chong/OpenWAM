@@ -337,8 +337,8 @@ def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum
 # --- Retention / finalize (prune) ---
 
 
-def manage_checkpoints(output_dir: str, keep_last_k: int):
-    """Keep only the most recent *keep_last_k* checkpoints.
+def manage_checkpoints(output_dir: str, keep_last_k: int | None):
+    """Keep only the most recent *keep_last_k* checkpoints (``None``/0 = keep all).
 
     Prunes ``checkpoint_step_*`` (weights, files) and ``accel_state_step_*``
     (resume state, dirs) in lockstep so a kept weights file always retains its
@@ -346,6 +346,8 @@ def manage_checkpoints(output_dir: str, keep_last_k: int):
     """
     import shutil
 
+    if not keep_last_k:
+        return
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*"))
     files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
     while len(files) > keep_last_k:
@@ -365,11 +367,11 @@ def manage_checkpoints(output_dir: str, keep_last_k: int):
             logger.warning("Failed to remove old accelerate state dir %s: %s", old, e)
 
 
-def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
+def finalize_keep_weights_only(output_dir: str, keep_last_k: int | None = 1):
     """Training-complete cleanup: drop all resume state, keep recent weights.
 
     Removes every ``accel_state_step_*`` dir and every ``checkpoint_step_*.safetensors``
-    except the most recent *keep_last_k*. Rank-0 only — caller must guard.
+    except the most recent *keep_last_k* (``None``/0 = keep all weights). Rank-0 only — caller must guard.
     """
     import shutil
 
@@ -381,6 +383,8 @@ def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
             except OSError as e:
                 logger.warning("Failed to remove accelerate state dir %s: %s", d, e)
 
+    if not keep_last_k:
+        return
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*.safetensors"))
     files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
     num_to_remove = max(0, len(files) - keep_last_k)
