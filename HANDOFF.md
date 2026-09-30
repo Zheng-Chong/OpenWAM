@@ -1,6 +1,6 @@
 # Project Handoff
 
-更新时间：2026-09-29
+更新时间：2026-09-30
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
 当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
@@ -77,6 +77,13 @@
 - 统计量沿用 mid-train 的文件，保证动作归一化和 checkpoint 一致；抽样 60 个窗口，没有值超出 [-1, 1]。验证集 `val_every: 10`。
 - 验证：dsw-share1 `pytest tests/dataloader/test_g1d_self_convert.py tests/dataloader/test_g1_dex1.py` → 6 passed（含与官方位姿逐帧对比）；读取器训练 48.8 万 / 验证 5.6 万窗口，视频解码和三视角拼图目检正确。
 
+## 其他数据集（2026-09-30）
+- 通用约定：新转换的数据集夹爪统一 `[0,1]`，0=闭合 1=张开；原始量程写进 `info.json`。旋转跳变阈值 20°/步 不变，保留 `too_long`。
+- **Galaxea**（`galaxea_convert.py`）：已完成。只保留桌面操作（`--max-chassis-cmd-frac 0.01 --max-torso-range 0.05`）并删除官方/录制质检不合格和规则命中 → 6,147 条 / 93.6 h / 480 GB，OSS `/mnt/data/datasets/Galaxea-lerobotv3`。本地副本已删。删除前 meta 备份：dsw-3 `/root/galaxea_meta_backup_20260930.tar`。
+- **Hy-Embodied**（`hy_embodied_convert.py`）：table_000 试跑通过；全量 22 张表转换 + 扫描在 dsw-4 跑（`/root/owam_hy/hy_full.sh`，日志 `/root/openwam_g1_logs/hy_full.log`，产物 `/root/Hy-Embodied-lerobotv3`）。完成后：审查扫描 → 删除 → 复制到 OSS → Notion。
+- **lingbot-GM-100**：subagent 在 dsw-4 做（代码在它的 worktree，未合并）。R1 Pro 已转（16,772 条 / 152.4 h，`/root/lingbot-lerobotv3`）；AgiBot G1、AgileX 只有关节角，按用户决定做 FK（进行中）。
+- 基础设施：dsw-2 ossfs 挂载断开（需平台重挂），dsw-1、dsw-5 SSH 被拒（dsw-1 上有 G1 mid-train，需确认）。AgiBot 第二轮提取在 dsw-3 重跑（日志 `agibot_extract3.log`），完成后对 60 个不完整任务重转并补扫描、删除、同步 OSS。
+
 ## 剩余事项与风险
 
 - AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
@@ -102,6 +109,8 @@
    ```
 
 ## 最近历史
+
+- 2026-09-30：新增 Hy-Embodied、Galaxea 转换和 official/bag/body_motion 等清洗规则；Galaxea 桌面子集写入 OSS；Hy 全量转换、lingbot FK 进行中。
 
 - 2026-09-29：G1D 自采数据转成 torso-EEF（URDF 正运动学，官方数据上误差 0），新增 `g1d_self` 读取器；准备后训练。
 - 2026-09-29：AgiBot LeRobot v3 复制到 OSS（8.48 TB）并核对；原始数据路径迁到 `AgiBot/`，补下载随之迁移。
