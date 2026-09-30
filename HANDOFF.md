@@ -77,6 +77,11 @@
 - 统计量沿用 mid-train 的文件，保证动作归一化和 checkpoint 一致；抽样 60 个窗口，没有值超出 [-1, 1]。验证集 `val_every: 10`。
 - 验证：dsw-share1 `pytest tests/dataloader/test_g1d_self_convert.py tests/dataloader/test_g1_dex1.py` → 6 passed（含与官方位姿逐帧对比）；读取器训练 48.8 万 / 验证 5.6 万窗口，视频解码和三视角拼图目检正确。
 
+## G1D 自采后训练部署（2026-09-30）
+- `scripts/serve_g1d.py`：对接机器人端现有的 openpi 协议客户端（msgpack，`observation/state` 关节 16 维 + 三路图像 → `actions [30,16]` 绝对关节角，夹爪原始 Dex1 单位）。服务端做 FK（关节→EEF20 本体感知）和阻尼最小二乘 IK（EEF20 动作块→关节，7 维臂第 7 自由度软拉向当前关节，关节限位来自 URDF）。`--self-test` 验证 FK→IK 往返：位置 <0.3 mm、旋转 <0.02°。`G1ArmFK` 新增 `transform`/`limits`，`pose` 复用。
+- dsw-6 已部署 step 16000（后训练进行中，最终 20000 步会更新）：本地 `/root/ckpts_g1d/step16000`，代码 `/root/openwam_deploy`，启动脚本 `/root/g1d_serve.sh <名> <端口> <GPU> "<指令>"`，日志 `/root/g1d_serve_logs/`。GPU0–3 依次：8001 capybara、8002 bottle、8003 marker、8004 capybara plush→basket（三物体）。`/healthz` 和协议探针均通过（假图像，`/root/probe_g1d.py`），提速后每次请求约 0.63 s：IK 0.4→0.04 s（Rodrigues FK + 反对称部分取雅可比旋转列 + 阻尼 0.01，自测位置 <0.1 mm / 旋转 <0.02°）；服务用 `--compile`（启动时预热 2 次，约 15 s，关掉 websocket ping 超时，否则预热/首请求会被 keepalive 断开）。离线评估（每任务 6 窗口共 36，dsw-6，`/root/eval_speed/`）：模型延迟 0.71→0.58 s，精度不变（左臂位置 13.18→13.22 mm，右臂 18.73→18.90 mm，旋转 3.7°/4.9° 不变）。
+- **未完成**：公网转发（机器人端到 dsw-6 的路径）被权限拦截，等用户决定；机器人端 `MODEL_REGISTRY` 里的地址要指向新端口；真机闭环、IK 关节连续性/限位表现未测；未提交。
+
 ## 其他数据集（2026-09-30）
 - 通用约定：新转换的数据集夹爪统一 `[0,1]`，0=闭合 1=张开；原始量程写进 `info.json`。旋转跳变阈值 20°/步 不变，保留 `too_long`。
 - **Galaxea**（`galaxea_convert.py`）：已完成。只保留桌面操作（`--max-chassis-cmd-frac 0.01 --max-torso-range 0.05`）并删除官方/录制质检不合格和规则命中 → 6,147 条 / 93.6 h / 480 GB，OSS `/mnt/data/datasets/Galaxea-lerobotv3`。本地副本已删。删除前 meta 备份：dsw-3 `/root/galaxea_meta_backup_20260930.tar`。

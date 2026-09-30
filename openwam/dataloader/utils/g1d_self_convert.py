@@ -101,6 +101,8 @@ class G1ArmFK:
     """Numpy forward kinematics torso_link → <side> gripper point, from the URDF."""
 
     def __init__(self, urdf_path: Path = URDF_PATH):
+        self._fixed = {}  # joint name -> static origin transform
+        self._chains = {}  # side -> kinematic chain
         self._joints = {}
         for j in ET.parse(urdf_path).getroot().findall("joint"):
             o, a = j.find("origin"), j.find("axis")
@@ -122,21 +124,43 @@ class G1ArmFK:
 
     def pose(self, side: str, q: np.ndarray) -> np.ndarray:
         """``q`` (N, 7) arm joints → (N, 6) torso-frame ``[xyz, extrinsic-XYZ rpy]``."""
+        R, pos = self.transform(side, q)
+        return np.concatenate([pos, Rotation.from_matrix(R).as_euler("xyz")], axis=1)
+
+    def transform(self, side: str, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``q`` (N, 7) → torso-frame gripper-point rotation (N, 3, 3) and position (N, 3)."""
         q = np.asarray(q, np.float64)
         n = len(q)
         by_name = {f"{side}_{name}_joint": q[:, i] for i, name in enumerate(ARM_JOINTS)}
         T = np.tile(np.eye(4), (n, 1, 1))
-        for name, _, typ, xyz, rpy, axis in self._chain(f"{side}_dex1_base_link"):
-            M = np.eye(4)
-            M[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
-            M[:3, 3] = xyz
-            T = T @ M
+        if side not in self._chains:
+            self._chains[side] = self._chain(f"{side}_dex1_base_link")
+        for name, _, typ, xyz, rpy, axis in self._chains[side]:
+            if name not in self._fixed:
+                M = np.eye(4)
+                M[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
+                M[:3, 3] = xyz
+                self._fixed[name] = M
+            T = T @ self._fixed[name]
             if typ == "revolute":
+                # Rodrigues about a unit axis (much cheaper than Rotation.from_rotvec per joint)
+                th = by_name[name]
+                K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
                 Rj = np.tile(np.eye(4), (n, 1, 1))
-                Rj[:, :3, :3] = Rotation.from_rotvec(axis[None] * by_name[name][:, None]).as_matrix()
+                Rj[:, :3, :3] = np.eye(3) + np.sin(th)[:, None, None] * K + (1 - np.cos(th))[:, None, None] * (K @ K)
                 T = T @ Rj
-        pos = T[:, :3, 3] + T[:, :3, 0] * TOOL_OFFSET_X
-        return np.concatenate([pos, Rotation.from_matrix(T[:, :3, :3]).as_euler("xyz")], axis=1)
+        return T[:, :3, :3], T[:, :3, 3] + T[:, :3, 0] * TOOL_OFFSET_X
+
+    def limits(self, side: str) -> tuple[np.ndarray, np.ndarray]:
+        """Arm joint (lower, upper) from the URDF, shape (7,) each."""
+        lo, hi = [], []
+        for j in ET.parse(URDF_PATH).getroot().findall("joint"):
+            if j.get("name") in {f"{side}_{n}_joint" for n in ARM_JOINTS}:
+                lo.append((j.get("name"), float(j.find("limit").get("lower"))))
+                hi.append((j.get("name"), float(j.find("limit").get("upper"))))
+        order = {f"{side}_{n}_joint": i for i, n in enumerate(ARM_JOINTS)}
+        srt = lambda v: np.array([x for _, x in sorted(v, key=lambda t: order[t[0]])])  # noqa: E731
+        return srt(lo), srt(hi)
 
 
 def _stack(df: pd.DataFrame, col: str) -> np.ndarray:
