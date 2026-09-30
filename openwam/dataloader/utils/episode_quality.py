@@ -18,12 +18,22 @@ Rules (thresholds are CLI flags; inspect ``quality.parquet`` before applying):
 * ``invalid_rot6d``              rot6d columns far from orthonormal
 * ``static``                     EEF path < ``--min-path-m`` and effector range < ``--min-effector-range``
 * ``bad_prompt``                 empty / too short / placeholder instruction
+* ``official_unqualified``       source annotators marked frames/episode unqualified
+  (``unqualified_frames`` / ``coarse_quality`` written by ``galaxea_convert``)
+* ``bag_unqualified``            source per-recording automatic check failed (``bag_quality`` = ``不合格``)
+* ``body_motion``                (opt-in) base command share > ``--max-chassis-cmd-frac`` or torso
+  joint range > ``--max-torso-range``; keeps tabletop-only episodes
 * ``black_video`` / ``frozen_video`` / ``bad_video``   (``--video``) sampled head frames
   dark, identical, or undecodable
 
     python -m openwam.dataloader.utils.episode_quality \
         --root /root/AgiBotWorld-Beta-lerobotv3 --out /root/agibot_quality --video --workers 48
     # review, then rerun with --apply
+
+Mobile-base statistics (``chassis_cmd_frac`` = share of frames with a nonzero
+``action.chassis.velocities`` command, ``torso_range`` = largest per-joint range
+of ``observation.state.torso``) are always recorded; they only flag episodes
+when the ``body_motion`` thresholds are given.
 """
 
 from __future__ import annotations
@@ -47,6 +57,9 @@ EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
 # 18-D ee_base = [L_xyz, L_rot6d, R_xyz, R_rot6d]
 ARMS = ((slice(0, 3), slice(3, 9)), (slice(9, 12), slice(12, 18)))
 HEAD_CAMERA = "observation.images.head"
+CHASSIS_CMD_COL, TORSO_COL = "action.chassis.velocities", "observation.state.torso"
+# optional per-episode columns converters write into meta/episodes, copied into the scan
+EPISODE_EXTRAS = {"bad_image_frames": 0, "unqualified_frames": 0, "coarse_quality": "", "bag_quality": ""}
 PLACEHOLDER = re.compile(r"^(null|none|nan|n/?a|todo|test|task|do something|default)\W*$", re.I)
 
 
@@ -128,13 +141,18 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
     for (chunk, file), group in eps.groupby(["data/chunk_index", "data/file_index"]):
         path = root / info["data_path"].format(chunk_index=chunk, file_index=file)
         names = set(pq.read_schema(path).names)
-        cols = [c for c in (POSE_COL, *EFFECTOR_COLS, "task_index") if c in names]
+        cols = [c for c in (POSE_COL, *EFFECTOR_COLS, CHASSIS_CMD_COL, TORSO_COL, "task_index") if c in names]
         table = pq.read_table(path, columns=cols)
         for _, ep in group.iterrows():
             n, start = int(ep["length"]), int(ep["_row"])
             win = table.slice(start, n)
-            r = {"bucket": root.name, "episode_index": int(ep["episode_index"]), "length": n,
-                 "bad_image_frames": int(ep.get("bad_image_frames", 0))}  # set by converters that patch frames
+            r = {"bucket": root.name, "episode_index": int(ep["episode_index"]), "length": n}
+            r.update({k: type(d)(ep[k]) if k in ep and pd.notna(ep[k]) else d for k, d in EPISODE_EXTRAS.items()})
+            if CHASSIS_CMD_COL in cols:
+                cmd = np.stack(win[CHASSIS_CMD_COL].to_numpy(zero_copy_only=False)).astype(np.float64)
+                r["chassis_cmd_frac"] = float((np.abs(cmd).max(axis=1) > 1e-3).mean())
+            if TORSO_COL in cols:
+                r["torso_range"] = float(np.ptp(np.stack(win[TORSO_COL].to_numpy(zero_copy_only=False)), axis=0).max())
             pose = np.stack(win[POSE_COL].to_numpy(zero_copy_only=False)).astype(np.float64)
             eff = [np.stack(win[c].to_numpy(zero_copy_only=False)).astype(np.float64) for c in EFFECTOR_COLS if c in cols]
             r["nonfinite"] = not (np.isfinite(pose).all() and all(np.isfinite(e).all() for e in eff))
@@ -169,6 +187,18 @@ def flag(df: pd.DataFrame, a: argparse.Namespace, fps_by_bucket: dict[str, float
         "static": (df["path_m"] < a.min_path_m) & (df["effector_range"] < a.min_effector_range),
         "bad_prompt": ~df["prompt_ok"],
     }
+    if "unqualified_frames" in df:  # older quality.parquet files (--quality) lack these columns
+        coarse = df["coarse_quality"].fillna("") if "coarse_quality" in df else pd.Series("", index=df.index)
+        rules["official_unqualified"] = (df["unqualified_frames"] > 0) | coarse.str.contains("unqualified")
+        if "bag_quality" in df:
+            rules["bag_unqualified"] = df["bag_quality"] == "不合格"
+    if getattr(a, "max_chassis_cmd_frac", None) is not None or getattr(a, "max_torso_range", None) is not None:
+        moving = pd.Series(False, index=df.index)
+        if a.max_chassis_cmd_frac is not None and "chassis_cmd_frac" in df:
+            moving |= df["chassis_cmd_frac"] > a.max_chassis_cmd_frac
+        if a.max_torso_range is not None and "torso_range" in df:
+            moving |= df["torso_range"] > a.max_torso_range
+        rules["body_motion"] = moving
     if "video_ok" in df.columns:
         rules["bad_video"] = df["video_ok"] == False  # noqa: E712 - NaN for unscanned rows stays False
         rules["black_video"] = df["video_mean"] < a.min_brightness
@@ -254,6 +284,8 @@ def main():
     ap.add_argument("--min-effector-range", type=float, default=0.05)
     ap.add_argument("--min-brightness", type=float, default=10.0)
     ap.add_argument("--min-frame-diff", type=float, default=0.5)
+    ap.add_argument("--max-chassis-cmd-frac", type=float, help="opt-in body_motion: share of base-command frames")
+    ap.add_argument("--max-torso-range", type=float, help="opt-in body_motion: torso joint range (rad)")
     a = ap.parse_args()
 
     root = Path(a.root)

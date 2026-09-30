@@ -96,3 +96,17 @@ def test_delete_converter_layout(tmp_path):
     eq.delete_episodes(tmp_path, pd.DataFrame({"bucket": ["b"] * 2, "episode_index": [7, 9], "reasons": ["static"] * 2}))
     assert not b.exists()  # emptied bucket removed
     assert json.loads((tmp_path / "deleted_buckets.json").read_text())["b"]["episodes"] == 2
+
+
+def test_flag_official_quality_and_body_motion():
+    base = dict(bucket="b", nonfinite=False, max_step_m=0.01, max_step_deg=1.0, rot6d_err=0.0, path_m=1.0,
+                effector_range=1.0, prompt_ok=True, length=300, unqualified_frames=0, coarse_quality="qualified",
+                bag_quality="合格", chassis_cmd_frac=0.0, torso_range=0.0)
+    df = pd.DataFrame([base, {**base, "unqualified_frames": 5}, {**base, "coarse_quality": "unqualified"},
+                       {**base, "bag_quality": "不合格"}, {**base, "chassis_cmd_frac": 0.3}, {**base, "torso_range": 0.4}])
+    a = argparse.Namespace(min_seconds=2.0, max_len_x_median=5.0, max_step_m=0.05, max_step_deg=20.0,
+                           min_path_m=0.05, min_effector_range=0.05, max_chassis_cmd_frac=None, max_torso_range=None)
+    assert eq.flag(df, a, {"b": 15.0}).tolist() == ["", "official_unqualified", "official_unqualified",
+                                                    "bag_unqualified", "", ""]  # body_motion is opt-in
+    a.max_chassis_cmd_frac, a.max_torso_range = 0.01, 0.05
+    assert eq.flag(df, a, {"b": 15.0}).tolist()[4:] == ["body_motion", "body_motion"]
