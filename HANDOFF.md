@@ -82,6 +82,11 @@
 - **Galaxea**（`galaxea_convert.py`）：已完成。只保留桌面操作（`--max-chassis-cmd-frac 0.01 --max-torso-range 0.05`）并删除官方/录制质检不合格和规则命中 → 6,147 条 / 93.6 h / 480 GB，OSS `/mnt/data/datasets/Galaxea-lerobotv3`。本地副本已删。删除前 meta 备份：dsw-3 `/root/galaxea_meta_backup_20260930.tar`。
 - **Hy-Embodied**（`hy_embodied_convert.py`）：table_000 试跑通过；全量 22 张表转换 + 扫描在 dsw-4 跑（`/root/owam_hy/hy_full.sh`，日志 `/root/openwam_g1_logs/hy_full.log`，产物 `/root/Hy-Embodied-lerobotv3`）。完成后：审查扫描 → 删除 → 复制到 OSS → Notion。
 - **lingbot-GM-100**：subagent 在 dsw-4 做（代码在它的 worktree，未合并）。R1 Pro 已转（16,772 条 / 152.4 h，`/root/lingbot-lerobotv3`）；AgiBot G1、AgileX 只有关节角，按用户决定做 FK（进行中）。
+- **InternData-A1 仿真**（lift2 + split_aloha，用户决定只用 `sim_updated_lerobotv30`，`sim`/`sim_updated` 是同批旧版不用；真机 `physical/*` 是 v2.1 纯关节、共 255 条，暂不做）：225 个 tar 已解压到 OSS `/mnt/data/datasets/InternRobotics/InternData-A1-lerobotv3/<类别>/<本体>/<任务>/`（dsw-3 `/root/owam_intern/extract.sh`，按 `.<任务>.done` 续跑），格式即 `interndata_a1` 读取器所需，无需转换。
+  - `episode_quality` 支持 A1：位姿取 `states.{left,right}_ee_to_robot_pose`（xyz + 四元数 wxyz → rot6d），夹爪用读取器的 `resolve_gripper_scale` 缩放到 [0,1]，头部相机 `images.rgb.head`，bucket 递归查找（bucket 名 = 相对路径）。
+  - 官方 episodes 清单在数据文件边界把 episode 记到前一个文件（数据本身完整）；读取器早已按 `dataset_from_index` 对照实际行数重定位，扫描也照做（仅 A1）。
+  - 试扫 2 个 bucket：lift2 0 命中；split_aloha close_the_microwave_left_arm 标出 16%（`pos_jump`/`rot_jump` 各约 340，`too_short` 58 条，最短 8 帧）。跳变已核对行对齐无误，是真实数据问题：工作臂 8–55 帧单步 > 5 cm，最大 0.64 m/帧。阈值不变。
+  - 全量扫描在 dsw-4 跑：`/root/owam_intern/repo`，日志 `/root/openwam_g1_logs/intern_quality.log`，输出 `/root/intern_quality/`（未 apply）。多 episode 共用文件，`--delete` 不适用，按用户决定用 `--apply` 写黑名单，之后重算 `interndata_a1_stats_computation`。
 - 基础设施：dsw-2 ossfs 挂载断开（需平台重挂），dsw-1、dsw-5 SSH 被拒（dsw-1 上有 G1 mid-train，需确认）。AgiBot 第二轮提取在 dsw-3 重跑（日志 `agibot_extract3.log`），完成后对 60 个不完整任务重转并补扫描、删除、同步 OSS。
 
 ## 剩余事项与风险
@@ -110,6 +115,7 @@
 
 ## 最近历史
 
+- 2026-09-30：InternData-A1 仿真 lift2/split_aloha 解压到 OSS；`episode_quality` 支持 A1 列格式与清单文件编号错位，全量扫描进行中。
 - 2026-09-30：新增 Hy-Embodied、Galaxea 转换和 official/bag/body_motion 等清洗规则；Galaxea 桌面子集写入 OSS；Hy 全量转换、lingbot FK 进行中。
 
 - 2026-09-29：G1D 自采数据转成 torso-EEF（URDF 正运动学，官方数据上误差 0），新增 `g1d_self` 读取器；准备后训练。

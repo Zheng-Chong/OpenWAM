@@ -34,12 +34,17 @@ Mobile-base statistics (``chassis_cmd_frac`` = share of frames with a nonzero
 ``action.chassis.velocities`` command, ``torso_range`` = largest per-joint range
 of ``observation.state.torso``) are always recorded; they only flag episodes
 when the ``body_motion`` thresholds are given.
+
+Buckets without ``ee_base`` but with InternData-A1's ``states.{left,right}_ee_to_robot_pose``
+(xyz + quaternion wxyz) are scanned from those columns, with grippers scaled to the
+reader's [0, 1] aperture. Buckets are found recursively (bucket = path under root).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 from concurrent.futures import ProcessPoolExecutor
@@ -49,6 +54,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from openwam.dataloader.interndata_a1 import ROBOT_TYPE_TO_EMBODIMENT, iter_data_shards, resolve_gripper_scale
+from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d
 from openwam.dataloader.utils.exclusion_io import atomic_publish_text, locked_exclusion_files
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet, parse_info_json
 
@@ -56,7 +63,10 @@ POSE_COL = "observation.state.ee_base"
 EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
 # 18-D ee_base = [L_xyz, L_rot6d, R_xyz, R_rot6d]
 ARMS = ((slice(0, 3), slice(3, 9)), (slice(9, 12), slice(12, 18)))
-HEAD_CAMERA = "observation.images.head"
+HEAD_CAMERAS = ("observation.images.head", "images.rgb.head")
+# InternData-A1: per-arm xyz + quaternion wxyz; grippers in native stroke units
+INTERN_POSE_COLS = ("states.left_ee_to_robot_pose", "states.right_ee_to_robot_pose")
+INTERN_GRIPPER_COLS = ("states.left_gripper.position", "states.right_gripper.position")
 CHASSIS_CMD_COL, TORSO_COL = "action.chassis.velocities", "observation.state.torso"
 # optional per-episode columns converters write into meta/episodes, copied into the scan
 EPISODE_EXTRAS = {"bad_image_frames": 0, "unqualified_frames": 0, "coarse_quality": "", "bag_quality": ""}
@@ -126,22 +136,47 @@ def video_metrics(path: Path, t0: float, t1: float, samples: int) -> dict:
     }
 
 
+def _column(table, name: str) -> np.ndarray:
+    return np.stack(table[name].to_numpy(zero_copy_only=False)).astype(np.float64).reshape(len(table), -1)
+
+
+def _relocate_by_global_index(root: Path, eps: pd.DataFrame) -> None:
+    """Place episodes by ``dataset_from_index`` against physical shard lengths (as InternDataA1 does)."""
+    shards = iter_data_shards(root)
+    starts = np.cumsum([0] + [pq.read_metadata(p).num_rows for _, _, p in shards])
+    g = eps["dataset_from_index"].to_numpy()
+    pos = np.searchsorted(starts, g, side="right") - 1
+    if starts[-1] != eps["dataset_to_index"].max() or (g + eps["length"].to_numpy() > starts[pos + 1]).any():
+        raise ValueError(f"{root}: data shards do not match the episodes manifest")
+    eps["data/chunk_index"] = [shards[i][0] for i in pos]
+    eps["data/file_index"] = [shards[i][1] for i in pos]
+    eps["_row"] = g - starts[pos]
+
+
 def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.DataFrame:
     root = Path(bucket)
     info = parse_info_json(root)
     eps = load_episodes_parquet(root)
     eps["_row"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
+    if info.get("robot_type") in ROBOT_TYPE_TO_EMBODIMENT:  # InternData-A1: manifest file indices can be stale
+        _relocate_by_global_index(root, eps)
     cams = [c.split("/")[1] for c in eps.columns if c.startswith("videos/") and c.endswith("/chunk_index")]
-    head = HEAD_CAMERA if HEAD_CAMERA in cams else (cams[0] if cams else HEAD_CAMERA)  # e.g. Hy: cam_high
+    head = next((c for c in HEAD_CAMERAS if c in cams), cams[0] if cams else HEAD_CAMERAS[0])  # e.g. Hy: cam_high
     vcol = (f"videos/{head}/chunk_index", f"videos/{head}/file_index")
     tasks = pd.read_parquet(root / "meta" / "tasks.parquet")
     task_text = dict(zip(tasks["task_index"], tasks.index))
+    grip_scale = {}
+    if info.get("robot_type") in ROBOT_TYPE_TO_EMBODIMENT:  # InternData-A1
+        emb = ROBOT_TYPE_TO_EMBODIMENT[info["robot_type"]]
+        grip_scale = {c: resolve_gripper_scale(root, emb, c) for c in INTERN_GRIPPER_COLS}
 
     rows = []
     for (chunk, file), group in eps.groupby(["data/chunk_index", "data/file_index"]):
         path = root / info["data_path"].format(chunk_index=chunk, file_index=file)
         names = set(pq.read_schema(path).names)
-        cols = [c for c in (POSE_COL, *EFFECTOR_COLS, CHASSIS_CMD_COL, TORSO_COL, "task_index") if c in names]
+        intern = POSE_COL not in names
+        pose_cols, eff_cols = (INTERN_POSE_COLS, INTERN_GRIPPER_COLS) if intern else ((POSE_COL,), EFFECTOR_COLS)
+        cols = [c for c in (*pose_cols, *eff_cols, CHASSIS_CMD_COL, TORSO_COL, "task_index") if c in names]
         table = pq.read_table(path, columns=cols)
         for _, ep in group.iterrows():
             n, start = int(ep["length"]), int(ep["_row"])
@@ -153,9 +188,12 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
                 r["chassis_cmd_frac"] = float((np.abs(cmd).max(axis=1) > 1e-3).mean())
             if TORSO_COL in cols:
                 r["torso_range"] = float(np.ptp(np.stack(win[TORSO_COL].to_numpy(zero_copy_only=False)), axis=0).max())
-            pose = np.stack(win[POSE_COL].to_numpy(zero_copy_only=False)).astype(np.float64)
-            eff = [np.stack(win[c].to_numpy(zero_copy_only=False)).astype(np.float64) for c in EFFECTOR_COLS if c in cols]
-            r["nonfinite"] = not (np.isfinite(pose).all() and all(np.isfinite(e).all() for e in eff))
+            raw = [_column(win, c) for c in pose_cols]
+            eff = [_column(win, c) / grip_scale.get(c, 1.0) for c in eff_cols if c in cols]
+            r["nonfinite"] = not all(np.isfinite(x).all() for x in (*raw, *eff))
+            pose = np.concatenate(
+                [np.concatenate([a[:, :3], quat_wxyz_to_rot6d(np.nan_to_num(a[:, 3:]))], 1) for a in raw], 1
+            ).astype(np.float64) if intern else raw[0]
             r["zero_pose_frames"] = int(sum((np.abs(pose[:, xyz]).sum(1) == 0).sum() for xyz, _ in ARMS))
             r.update(pose_metrics(np.nan_to_num(pose)) if not r["nonfinite"] else {})
             r["effector_range"] = float(max((np.ptp(e, axis=0).max() for e in eff), default=0.0))
@@ -265,6 +303,16 @@ def delete_episodes(root: Path, df: pd.DataFrame) -> None:
         log.write_text(json.dumps(record, indent=1))
 
 
+def find_buckets(root: Path) -> list[str]:
+    """Bucket dirs (``meta/info.json``) at any depth, as paths relative to ``root``; no descent into buckets."""
+    out = []
+    for d, dirs, _ in os.walk(root):
+        if (Path(d) / "meta" / "info.json").is_file():
+            out.append(str(Path(d).relative_to(root)))
+            dirs.clear()
+    return sorted(out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", required=True, help="dataset root containing bucket dirs (or a single bucket)")
@@ -292,14 +340,14 @@ def main():
     if (root / "meta" / "info.json").is_file():
         root, buckets = root.parent, [root.name]
     else:
-        buckets = a.buckets or sorted(p.name for p in root.iterdir() if (p / "meta" / "info.json").is_file())
+        buckets = a.buckets or find_buckets(root)
     if a.quality:
         df = pd.read_parquet(a.quality).drop(columns="reasons", errors="ignore")
         df = df[df["bucket"].isin(buckets)].reset_index(drop=True)
     else:
         with ProcessPoolExecutor(a.workers) as pool:
             futs = {b: pool.submit(scan_bucket, str(root / b), a.video) for b in buckets}
-            df = pd.concat([f.result() for f in futs.values()], ignore_index=True)
+            df = pd.concat([f.result().assign(bucket=b) for b, f in futs.items()], ignore_index=True)
     fps = {b: float(parse_info_json(root / b)["fps"]) for b in buckets}
     df["reasons"] = flag(df, a, fps)
 

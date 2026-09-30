@@ -110,3 +110,39 @@ def test_flag_official_quality_and_body_motion():
                                                     "bag_unqualified", "", ""]  # body_motion is opt-in
     a.max_chassis_cmd_frac, a.max_torso_range = 0.01, 0.05
     assert eq.flag(df, a, {"b": 15.0}).tolist()[4:] == ["body_motion", "body_motion"]
+
+
+def test_scan_interndata_bucket(tmp_path):
+    """Nested InternData-A1 bucket: xyz + quat(wxyz) per arm, gripper in metres."""
+    b = tmp_path / "basic_tasks" / "split_aloha" / "task"
+    (b / "meta" / "episodes" / "chunk-000").mkdir(parents=True)
+    (b / "data" / "chunk-000").mkdir(parents=True)
+    info = {"codebase_version": "v3.0", "robot_type": "AgileX Split Aloha", "fps": 30,
+            "total_episodes": 2, "total_frames": 200, "features": {},
+            "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+            "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"}
+    (b / "meta" / "info.json").write_text(json.dumps(info))
+    pd.DataFrame({"task_index": [0]}, index=["Pick up the cup."]).to_parquet(b / "meta" / "tasks.parquet")
+    pd.DataFrame({"episode_index": [0, 1], "length": [100, 100], "data/chunk_index": [0, 0],
+                  "data/file_index": [0, 0], "dataset_from_index": [0, 100], "dataset_to_index": [100, 200]}
+                 ).to_parquet(b / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
+    pose = np.tile([0.3, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0], (200, 1))  # identity quaternion, w first
+    pose[:100, 0] += np.linspace(0, 0.2, 100)  # ep 0: smooth 20 cm reach
+    grip = np.zeros((200, 1))
+    grip[:100, 0] = np.linspace(0, 0.1, 100)  # ep 0 opens fully (0.1 m stroke); ep 1 static
+    pose[150:, 1] += 0.3  # ep 1: 30 cm teleport
+    cols = {"task_index": np.zeros(200, dtype=np.int64)}
+    for side in ("left", "right"):
+        cols[f"states.{side}_ee_to_robot_pose"] = list(pose.astype(np.float32))
+        cols[f"states.{side}_gripper.position"] = list(grip.astype(np.float32))
+    # two shards, one episode each, but the manifest (like A1's) puts both in file-000
+    pd.DataFrame(cols).iloc[:100].to_parquet(b / "data" / "chunk-000" / "file-000.parquet")
+    pd.DataFrame(cols).iloc[100:].to_parquet(b / "data" / "chunk-000" / "file-001.parquet")
+
+    assert eq.find_buckets(tmp_path) == ["basic_tasks/split_aloha/task"]
+    df = eq.scan_bucket(str(b))
+    assert np.isclose(df.loc[0, "effector_range"], 1.0) and df.loc[0, "rot6d_err"] < 1e-6
+    assert df.loc[0, "max_step_deg"] < 1e-3 and df.loc[1, "max_step_m"] > 0.29
+    a = argparse.Namespace(min_seconds=2.0, max_len_x_median=5.0, max_step_m=0.10, max_step_deg=20.0,
+                           min_path_m=0.05, min_effector_range=0.05)
+    assert eq.flag(df, a, {"task": 30.0}).tolist() == ["", "pos_jump"]
