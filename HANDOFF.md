@@ -80,7 +80,9 @@
 ## G1D 自采后训练部署（2026-09-30）
 - `scripts/serve_g1d.py`：对接机器人端现有的 openpi 协议客户端（msgpack，`observation/state` 关节 16 维 + 三路图像 → `actions [30,16]` 绝对关节角，夹爪原始 Dex1 单位）。服务端做 FK（关节→EEF20 本体感知）和阻尼最小二乘 IK（EEF20 动作块→关节，7 维臂第 7 自由度软拉向当前关节，关节限位来自 URDF）。`--self-test` 验证 FK→IK 往返：位置 <0.3 mm、旋转 <0.02°。`G1ArmFK` 新增 `transform`/`limits`，`pose` 复用。
 - dsw-6 已部署 step 16000（后训练进行中，最终 20000 步会更新）：本地 `/root/ckpts_g1d/step16000`，代码 `/root/openwam_deploy`，启动脚本 `/root/g1d_serve.sh <名> <端口> <GPU> "<指令>"`，日志 `/root/g1d_serve_logs/`。GPU0–3 依次：8001 capybara、8002 bottle、8003 marker、8004 capybara plush→basket（三物体）。`/healthz` 和协议探针均通过（假图像，`/root/probe_g1d.py`），提速后每次请求约 0.63 s：IK 0.4→0.04 s（Rodrigues FK + 反对称部分取雅可比旋转列 + 阻尼 0.01，自测位置 <0.1 mm / 旋转 <0.02°）；服务用 `--compile`（启动时预热 2 次，约 15 s，关掉 websocket ping 超时，否则预热/首请求会被 keepalive 断开）。离线评估（每任务 6 窗口共 36，dsw-6，`/root/eval_speed/`）：模型延迟 0.71→0.58 s，精度不变（左臂位置 13.18→13.22 mm，右臂 18.73→18.90 mm，旋转 3.7°/4.9° 不变）。
-- **未完成**：公网转发（机器人端到 dsw-6 的路径）被权限拦截，等用户决定；机器人端 `MODEL_REGISTRY` 里的地址要指向新端口；真机闭环、IK 关节连续性/限位表现未测；未提交。
+- 网关公网转发已开（用户同意）：10076→8001 capybara、10077→8002 bottle、10078→8003 marker、10079→8004 plush→basket、10080→8005 倒豆子-Plus（GPU4，指令 "Pour the beans."）。网关上 autossh 常驻，日志 `tunnel_1007x.log`。
+- 机器人端客户端（`scripts/unitree_client/`，仓库里是脱敏副本，机器人上 `/home/unitree/client/jepa_g1d_client/` 是带真实地址的原件，旧文件备份 `.bak_pre_*`）：`MODEL_REGISTRY` 加了 OpenWAM 条目；新增启动时选 prompt（`PROMPTS` 11 条训练指令 + 自定义，仅对 `policy` 以 `OpenWAM` 开头的服务弹出；`--prompt` / 环境变量 `PROMPT` 跳过选单），`JepaWamClient.prompt` 随每次请求发送。仓库副本用环境变量 `G1D_GATEWAY_HOST` 代替网关地址。运行要用 `unitree_lerobot` conda 环境（有 msgpack）。
+- **未完成**：真机闭环、IK 关节连续性/限位表现未测；step 20000 出来后需换权重（四个服务 + 豆子-Plus 服务都要重启，`/root/g1d_serve.sh`）。
 
 ## 其他数据集（2026-09-30）
 - 通用约定：新转换的数据集夹爪统一 `[0,1]`，0=闭合 1=张开；原始量程写进 `info.json`。旋转跳变阈值 20°/步 不变，保留 `too_long`。
