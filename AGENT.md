@@ -47,6 +47,7 @@ python3 -m pytest -q tests/dataloader/test_g1_dex1.py tests/test_eval_offline.py
 - 不在服务器上做 git 操作，代码按已跟踪文件清单 rsync 到隔离目录。
 - 训练输出放本地盘 `/root/...`（ossfs 上存 safetensors 会失败）；checkpoint 另外复制一份到 `/mnt/data/chongzheng/openwam_g1/ckpts/`。
 - 训练/评估读的数据（parquet、视频）和 checkpoint 权重不能直接从 OSS（`/mnt/data`，ossfs）读，先复制到本机本地盘（如 `/root/g1d_data/`、`/root/ckpts/`），`info.json` 里 `video_path` 等绝对路径同步改成本地路径（2026-09-29 G1D 后训练在 dsw-1 跑到 micro 第 6483 步时 ossfs 掉线 `传输端点尚未连接`，读视频失败导致训练退出）。OSS 只做跨机持久副本（顺序 `cp`/`rsync`），每台机器首次使用时复制一次。
+- 训练日志（`*.log`、`debug_loss_history.csv`、wandb offline 目录）也要定期复制到 OSS（如 `/mnt/data/chongzheng/openwam_g1/logs/`），和 checkpoint 一样放进同步脚本：DSW 实例可能被重建，`/root` 会整个清空（2026-09-30 dsw-1 重建后，mid-train 日志和第一次后训练前 6483 步的日志都丢了）。
 - 长任务用 `setsid nohup ... & disown` 起。
 - 不碰别人的进程；不重启正在跑的训练，除非用户明确同意。
 
