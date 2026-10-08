@@ -94,11 +94,11 @@ CAMERA_SOURCE = {
 #: return whole chunks; --exec_steps / --ensemble pick how they are run.
 GATEWAY_HOST = os.environ.get("G1D_GATEWAY_HOST", "127.0.0.1")  # public relay to the GPU box; set on the robot
 MODEL_REGISTRY = [
-    ("OpenWAM G1D 后训练 step16000 - 倒豆子-Plus", GATEWAY_HOST, 10080),
-    ("OpenWAM G1D 后训练 step16000 - 卡皮巴拉放箱子", GATEWAY_HOST, 10076),
-    ("OpenWAM G1D 后训练 step16000 - 三物体: bottle", GATEWAY_HOST, 10077),
-    ("OpenWAM G1D 后训练 step16000 - 三物体: marker", GATEWAY_HOST, 10078),
-    ("OpenWAM G1D 后训练 step16000 - 三物体: capybara plush", GATEWAY_HOST, 10079),
+    ("OpenWAM G1D 后训练 step20000 - 倒豆子-Plus", GATEWAY_HOST, 10080),
+    ("OpenWAM G1D 后训练 step20000 - 卡皮巴拉放箱子", GATEWAY_HOST, 10076),
+    ("OpenWAM G1D 后训练 step20000 - 三物体: bottle", GATEWAY_HOST, 10077),
+    ("OpenWAM G1D 后训练 step20000 - 三物体: marker", GATEWAY_HOST, 10078),
+    ("OpenWAM G1D 后训练 step20000 - 三物体: capybara plush", GATEWAY_HOST, 10079),
     ("ViT-B single ΨG1D chunk120 20k - 三物体: capybara plush", GATEWAY_HOST, 10070),
     ("ACT (wuqingman, 3cam, 60k) - 卡皮巴拉放篮子", GATEWAY_HOST, 10071),
     ("ViT-B single ΨG1D chunk120 20k - 三物体: bottle", GATEWAY_HOST, 10072),
