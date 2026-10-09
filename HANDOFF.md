@@ -129,6 +129,20 @@
   - Notion「单臂桌面操作数据集」：DROID success、LIBERO 5 套件已标「已完成」并填筛选后数据；OXE 35 个子集已排队（29 个单臂候选「待确认」、6 个移动/四足/双臂「未纳入」），都还没质检。
 - 下一步：OXE（已是 v3.0，但 state/action 语义各异、5–10 Hz 低分辨率，需要逐个确认位姿列再写适配）；RoboMIND / RoboMIND2.0 Franka·UR5 / RoboCOIN 单臂桶 / oxe-auge 等要转格式；Meta-World 是否纳入待用户定；DROID 与 LIBERO 的 stats / reader。
 
+## 夹爪事件子任务切分（2026-10-09）
+
+- 目标（用户）：把 episode 按 action 轨迹切成子任务片段，每段结尾是一个关键点；**子任务 caption 先不做**。
+- `openwam/dataloader/utils/gripper_segments.py`：只读 action 夹爪列（`action.{left,right}_gripper`，或 G1 扁平 16 维关节布局的 `action[14:16]`），跳过 `excluded_episodes.json`，输出每个 bucket 的 `<bucket>.json`（每集 `events` / `raw_events`，`(帧, L+|L-|R+|R-)`，`+` 开始合、`-` 开始松）和 `summary.json`。不改数据。
+- 规则（逐条和用户在视频上核对过）：
+  - 阈值：每集张开位 = 夹爪最大值，低于张开位 0.3 算闭合、回到 0.15 以内算张开；按 bucket 夹爪量程缩放（官方 4.5，部分仿真 / 纯关节桶 5.4，方向一致不用翻转）。
+  - 边界 = 夹爪**开始变化**的帧（从阈值穿越点往回找，最多 1 s），合与松一致。
+  - 空闲姿态：前 1 s 内开始且合到接近全闭（< 量程 10%）的闭合，连同它的张开都不算事件（官方 12.5% 的集开局主动合爪，PackBag 94%）。只合到一半的早期闭合是开局就夹着东西（自采 PourBeans 裁剪版），保留。
+  - 短片段合并 `--min-seg 15`（0.5 s；1 s 会删掉分拣类任务里真实的快抓放）：同手松开后很快又合 = 重抓，两个事件都去掉；但间隔里夹爪张开到最大的是真放下，保留松开，只去掉后面那次短暂合爪；其余短片段并入前一段（第一段并入后一段）。
+- 结论：所有 86 个官方桶都用夹爪；单手抓放、双手倒水类模板很稳（自采 5/6 任务主模式 52–100%）。不适合只靠夹爪的：擦拭类（Wipe_Board 等抓一次后主体动作在同一段）、叠衣服 / 装配（重抓多、顺序不固定，Fold_Clothes 1232 集 1192 种序列）。闭合到 0 不代表空抓（纸巾、纸杯沿、笔都会合到 0）。
+- 结果（服务器本地，不在 OSS）：官方 dsw-4 `/root/seg/tool_out/`（parquet 副本 `/root/seg/g1dex1/`，27 GB），自采 dsw-8 `/root/seg/tool_out/`；叠加切分点的抽样视频 dsw-4 `/root/seg/vid*/`、dsw-8 `/root/seg/vid/`。官方 60,654 集：合并比例 5.8%，首事件为松开 2.8%（多是两手 0.5 s 内先后动作，并段后删掉的是前一个事件）。
+- 仓库版相对探索脚本修了一个 bug：脚本算了“间隔 < 10 帧的闭合合并”却返回未合并结果。修后 4,028 集事件变化，抽查都是去掉假松开（ToolboxStorage ep1、ArrangePlates ep13）。
+- 未做：子任务 caption、读取器按片段给提示词、PourBeans 按指令分模板、擦拭 / 叠衣服类的运动细分。
+
 ## 剩余事项与风险
 
 - AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
@@ -155,6 +169,7 @@
 
 ## 最近历史
 
+- 2026-10-09：新增 `gripper_segments`，按夹爪事件切子任务片段；跑完 86 个官方 G1-Dex1 桶和 G1D 自采数据。
 - 2026-10-09：`episode_quality` 支持 DROID / LIBERO 单臂；单臂数据集 Notion 库建立，DROID 与 LIBERO 扫描进行中。
 - 2026-09-30：InternData-A1 仿真 lift2/split_aloha 解压到 OSS；`episode_quality` 支持 A1 列格式与清单文件编号错位，全量扫描进行中。
 - 2026-09-30：新增 Hy-Embodied、Galaxea 转换和 official/bag/body_motion 等清洗规则；Galaxea 桌面子集写入 OSS；Hy 全量转换、lingbot FK 进行中。
