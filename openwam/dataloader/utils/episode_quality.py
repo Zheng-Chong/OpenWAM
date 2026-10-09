@@ -17,7 +17,8 @@ Rules (thresholds are CLI flags; inspect ``quality.parquet`` before applying):
 * ``rot_jump``                   per-step EEF rotation > ``--max-step-deg``
 * ``invalid_rot6d``              rot6d columns far from orthonormal
 * ``static``                     EEF path < ``--min-path-m`` and effector range < ``--min-effector-range``
-* ``bad_prompt``                 empty / too short / placeholder instruction
+* ``bad_prompt``                 empty / too short / placeholder instruction, or a template slot left
+  empty ("move the  to the box", InternData-A1 sim)
 * ``official_unqualified``       source annotators marked frames/episode unqualified
   (``unqualified_frames`` / ``coarse_quality`` written by ``galaxea_convert``)
 * ``bag_unqualified``            source per-recording automatic check failed (``bag_quality`` = ``不合格``)
@@ -71,6 +72,8 @@ CHASSIS_CMD_COL, TORSO_COL = "action.chassis.velocities", "observation.state.tor
 # optional per-episode columns converters write into meta/episodes, copied into the scan
 EPISODE_EXTRAS = {"bad_image_frames": 0, "unqualified_frames": 0, "coarse_quality": "", "bag_quality": ""}
 PLACEHOLDER = re.compile(r"^(null|none|nan|n/?a|todo|test|task|do something|default)\W*$", re.I)
+# article with no noun after it; case-sensitive so letters ("write the letter A.") don't count
+EMPTY_SLOT = re.compile(r"\b(?:[Tt]he|an?)\s+(?:to|with|on|onto|in|into|from|of|and|at|by|for)\b|\b[Tt]he\s*(?:[,.;:!?]|$)")
 
 
 def _rot6d_to_mat(r6: np.ndarray) -> np.ndarray:
@@ -106,7 +109,7 @@ def pose_metrics(pose: np.ndarray) -> dict:
 def prompt_ok(text: str) -> bool:
     text = (text or "").strip()
     words = len(re.findall(r"[A-Za-z]{2,}", text)) + len(re.findall(r"[\u4e00-\u9fff]", text))  # CJK: per character
-    return words >= 2 and not PLACEHOLDER.match(text)
+    return words >= 2 and not PLACEHOLDER.match(text) and not EMPTY_SLOT.search(text)
 
 
 def video_metrics(path: Path, t0: float, t1: float, samples: int) -> dict:

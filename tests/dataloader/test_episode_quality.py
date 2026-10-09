@@ -36,8 +36,11 @@ def test_prompt_ok():
     assert eq.prompt_ok("Pick the cucumber.")
     assert eq.prompt_ok("丢垃圾") and eq.prompt_ok("使用键盘打字：I am a robot.")
     assert not eq.prompt_ok("丢")
-    for bad in ("", "  ", "N/A", "task", "do something", "123", "go"):
+    for bad in ("", "  ", "N/A", "task", "do something", "123", "go",
+                "Move the shoe to the book with left arm, and move the  to the book with right arm.", "Pick up the."):
         assert not eq.prompt_ok(bad), bad
+    assert eq.prompt_ok("Pick up the pen and write the letter A.")
+    assert eq.prompt_ok("find blocks with the letters b, a, a, and i")
 
 
 def test_flag_and_apply(tmp_path):

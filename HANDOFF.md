@@ -1,6 +1,6 @@
 # Project Handoff
 
-更新时间：2026-09-30
+更新时间：2026-10-09
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
 当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
@@ -96,6 +96,19 @@
   - 试扫 2 个 bucket：lift2 0 命中；split_aloha close_the_microwave_left_arm 标出 16%（`pos_jump`/`rot_jump` 各约 340，`too_short` 58 条，最短 8 帧）。跳变已核对行对齐无误，是真实数据问题：工作臂 8–55 帧单步 > 5 cm，最大 0.64 m/帧。阈值不变。
   - 全量扫描在 dsw-4 跑：`/root/owam_intern/repo`，日志 `/root/openwam_g1_logs/intern_quality.log`，输出 `/root/intern_quality/`（未 apply）。多 episode 共用文件，`--delete` 不适用，按用户决定用 `--apply` 写黑名单，之后重算 `interndata_a1_stats_computation`。
 - 基础设施：dsw-2 ossfs 挂载断开（需平台重挂），dsw-1、dsw-5 SSH 被拒（dsw-1 上有 G1 mid-train，需确认）。AgiBot 第二轮提取在 dsw-3 重跑（日志 `agibot_extract3.log`），完成后对 60 个不完整任务重转并补扫描、删除、同步 OSS。
+
+## 双臂数据集指令质检（2026-10-09）
+
+- 全量导出 `/mnt/data/filter_datasets` 17 个数据集的指令（3574 个 bucket、约 9.4 万条）：dsw-8 本地 `/root/task_dump.csv`（列 ds / bucket / task_index / task / n）。
+- `episode_quality.prompt_ok` 新增 `EMPTY_SLOT`：冠词后直接跟介词或标点（如 "move the  to the book"）判为 `bad_prompt`。在全量导出上只命中 InternData-A1 仿真 5266 集，其他数据集 0 误报（"letter A." 这类已排除）。
+- 不把 slug（lingbot 全部、Sim1 `fold_mat`）、资产 ID（`microwave_gr`、`Galbot_G1_…_new1`）加进 `bad_prompt`：`--apply` 会把命中集写进排除名单，等于整批丢数据；这些问题改在 loader 里做文本规范化（未做）。
+- **数据修复待执行（未改，需用户在服务器上跑或授权）**，只改 `filter_datasets` 副本，源数据不动，先把 meta 打 tar 备份到 `/mnt/data/filter_datasets_v21_old/prompt_fix_20261009/`：
+  1. `Unitree_G1_Dex3/G1_Dex3_GraspSquare_Dataset`：`tasks.parquet` 和 `meta/episodes` 的 tasks 都写成 "camera packaging"，README 也是抄 BlockStacking 的。看视频实际是在黑胶带上从下到上叠红、黄、绿三个方块，改为 "Stack the three cubes on the black tape from bottom to top: red, yellow, green."。
+  2. `Unitree_G1_Dex3/G1_Dex3_Pick{Apple,Bottle,Charger,Doll,Gum,Snack,Tissue}_Dataset`：`tasks.parquet`（loader 实际读的）正确，`meta/episodes` 的 tasks 全写成 "Pick up the red cup on the table."；把 episodes 的 tasks 列改成 `tasks.parquet` 的文本。
+  3. `Unitree_G1_Dex1/G1_Dex1_MountCameraRedGripper_Dataset`：`tasks.parquet` 是 "mount camera."，episodes 是 "mount camera"；把 episodes 改成和 tasks.parquet 一致。
+  4. InternData-A1 仿真：用 `EMPTY_SLOT` 命中的 5266 集合并进各 bucket 的 `meta/excluded_episodes.json`（`episode_quality` 字段追加 `bad_prompt`）。ossfs 不支持 ftruncate，写文件要先写本地再替换。
+- 其余发现（措辞、大小写、重复词 "with with"/"the the"、RoboPro "please"、RoboCOIN 942 条未用 task 与 32 集空 tasks、Galaxea tasks 表里的 `qualified`/`unqualified`）只记录，未处理。
+- dsw-8 的 `/mnt/data` ossfs 在 2026-10-09 上午断开（传输端点尚未连接），需平台重挂。
 
 ## 剩余事项与风险
 
