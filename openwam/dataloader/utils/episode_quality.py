@@ -17,8 +17,11 @@ Rules (thresholds are CLI flags; inspect ``quality.parquet`` before applying):
 * ``rot_jump``                   per-step EEF rotation > ``--max-step-deg``
 * ``invalid_rot6d``              rot6d columns far from orthonormal
 * ``static``                     EEF path < ``--min-path-m`` and effector range < ``--min-effector-range``
-* ``bad_prompt``                 empty / too short / placeholder instruction, or a template slot left
-  empty ("move the  to the box", InternData-A1 sim)
+* ``bad_prompt``                 empty / too short / placeholder instruction, a template slot left
+  empty ("move the  to the box"), a repeated word ("with with"), a file-name slug
+  ("fold_mat", "hit-ball-with-gripper"), or an asset ID ("microwave_gr", "Galbot_G1_…_new1");
+  see ``prompt_text``. Readers with ``normalize_prompt: true`` clean the last two at load time,
+  so ``--apply`` on such a dataset drops episodes the reader could still use
 * ``official_unqualified``       source annotators marked frames/episode unqualified
   (``unqualified_frames`` / ``coarse_quality`` written by ``galaxea_convert``)
 * ``bag_unqualified``            source per-recording automatic check failed (``bag_quality`` = ``不合格``)
@@ -59,6 +62,7 @@ from openwam.dataloader.interndata_a1 import ROBOT_TYPE_TO_EMBODIMENT, iter_data
 from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d
 from openwam.dataloader.utils.exclusion_io import atomic_publish_text, locked_exclusion_files
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet, parse_info_json
+from openwam.dataloader.utils.prompt_text import EMPTY_SLOT, REPEATED_WORD, SLUG, has_asset_id
 
 POSE_COL = "observation.state.ee_base"
 EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
@@ -72,8 +76,6 @@ CHASSIS_CMD_COL, TORSO_COL = "action.chassis.velocities", "observation.state.tor
 # optional per-episode columns converters write into meta/episodes, copied into the scan
 EPISODE_EXTRAS = {"bad_image_frames": 0, "unqualified_frames": 0, "coarse_quality": "", "bag_quality": ""}
 PLACEHOLDER = re.compile(r"^(null|none|nan|n/?a|todo|test|task|do something|default)\W*$", re.I)
-# article with no noun after it; case-sensitive so letters ("write the letter A.") don't count
-EMPTY_SLOT = re.compile(r"\b(?:[Tt]he|an?)\s+(?:to|with|on|onto|in|into|from|of|and|at|by|for)\b|\b[Tt]he\s*(?:[,.;:!?]|$)")
 
 
 def _rot6d_to_mat(r6: np.ndarray) -> np.ndarray:
@@ -109,7 +111,14 @@ def pose_metrics(pose: np.ndarray) -> dict:
 def prompt_ok(text: str) -> bool:
     text = (text or "").strip()
     words = len(re.findall(r"[A-Za-z]{2,}", text)) + len(re.findall(r"[\u4e00-\u9fff]", text))  # CJK: per character
-    return words >= 2 and not PLACEHOLDER.match(text) and not EMPTY_SLOT.search(text)
+    return (
+        words >= 2
+        and not PLACEHOLDER.match(text)
+        and not EMPTY_SLOT.search(text)
+        and not REPEATED_WORD.search(text)
+        and not SLUG.match(text)
+        and not has_asset_id(text)
+    )
 
 
 def video_metrics(path: Path, t0: float, t1: float, samples: int) -> dict:

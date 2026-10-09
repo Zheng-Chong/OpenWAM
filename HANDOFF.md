@@ -108,6 +108,11 @@
   3. `Unitree_G1_Dex1/G1_Dex1_MountCameraRedGripper_Dataset`：episodes "mount camera" → "mount camera."，与 tasks.parquet 一致。
   4. InternData-A1 仿真：`EMPTY_SLOT` 命中 5266 集（6 个 `continues_pick_and_place` 桶），32 集原已排除，新增 5234 集 / 69.98 h 写入 `excluded_episodes.json`（原因 `bad_prompt`）。仿真 415,085 → 409,851 集、2797.1149 → 2727.1349 h；Notion 数据集表已更新。**InternData 归一化统计待重算**（`interndata_a1_stats_computation`）。
   - 修复脚本只在 dsw-3 `/root/prompt_fix.py`（不进仓库，无参数为预览，`--apply` 写入）；回读核对通过，`load_episodes_parquet` 加载 3 个改过的 Unitree 桶正常。
+- **指令规范化（2026-10-09 第二轮）**：新增 `openwam/dataloader/utils/prompt_text.py`（`normalize_prompt` + 共享正则）。`LeRobotV3Reader` 新增配置键 `normalize_prompt`（默认 false，因为 LIBERO / RoboTwin / G1D 等评测客户端发的是原始字符串）；`agibotworld.yaml`、`robocoin.yaml`、`interndata_a1.yaml` 设为 true。规则：去机器人名前缀（`Galbot_G1_`）和录制/版本后缀（`_new1`、`_0501_04`、`Copy`、` v3`、`·`），去两字母资产码（`microwave_gr` → microwave），整句是 slug 时连字符转空格，下划线一律转空格，去 please，合并空格，首字母大写，补句号。全量 dump 上 82,946 条指令中 36,893 条会被改写。用这些配置训练的模型，评测时也要把指令过一遍 `normalize_prompt`。
+- **bad_prompt 扩展**：在空槽位之外加入重复词、slug、资产 ID（按用户要求）。全量 dump 上新增命中：重复词 ~1k 集（RoboTwin 509、RoboPro 332、IROS 116、RDT 40）；slug：lingbot 46,337（全部）、InternData 4,092、RoboCOIN 3,503、Sim1 1,976；资产 ID：InternData 59,556、RoboCOIN 3,791、Sim1 1,168、InternData 真机 200。**只是标记，没有对任何数据集跑 `--apply`**；slug/资产 ID 这两类 loader 已能规范化，`--apply` 前需决定是否真要排除。
+- prompt 缓存：训练（`wan_backbone._train_prompt_embed_cache`）和部署（`prompt_embed_cache`）都是进程内 dict，没有落盘缓存，新进程自动按新文本重建，无需操作。
+- **InternData 归一化统计未算**：`interndata_a1_stats_computation` 在 `filter_datasets/InternData-A1_lerobotv3` 上拒绝运行，因为 `basic_tasks__lift2__store_the_toothbrushes_part{1,2}`（1,396 集 / 6.4 h）只有关节角、没有 EEF 位姿；训练 reader 遇到这两个桶同样会报错。需用户决定处理方式（移出副本 / FK 补位姿），之后再算统计（尚无任何 stats_*.json）。
+- lingbot-GM-100 副本用 AgiBotWorld reader 读会报缺 `action.ee_base`，目前没有能直接读它的 loader（与本次改动无关）。
 - 其余发现（措辞、大小写、重复词 "with with"/"the the"、RoboPro "please"、RoboCOIN 942 条未用 task 与 32 集空 tasks、Galaxea tasks 表里的 `qualified`/`unqualified`）只记录，未处理。
 - dsw-8 的 `/mnt/data` ossfs 在 2026-10-09 上午断开（传输端点尚未连接），需平台重挂。
 

@@ -89,6 +89,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     subsample_episodes_by_hours,
 )
 from openwam.dataloader.utils.normalization import materialize_eef_stats
+from openwam.dataloader.utils.prompt_text import normalize_prompt as _normalize_prompt
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 from openwam.dataloader.utils.video_io import decode_video_frames as _decode_video_frames
 
@@ -206,6 +207,9 @@ class LeRobotV3Reader(BaseDataset):
         # (default). Truthy → enabled; a dict overrides
         # the per-channel strengths {brightness, contrast, saturation, hue}.
         color_jitter: Optional[Any] = None,
+        # Rewrite prompts into one house style (prompt_text.normalize_prompt).
+        # Off by default: benchmark eval clients send the raw strings.
+        normalize_prompt: bool = False,
         # Optional data-budget knobs (None = use the full bucket).
         max_hours: Optional[float] = None,
         subsample_seed: int = 42,
@@ -227,6 +231,7 @@ class LeRobotV3Reader(BaseDataset):
         self._camera_layout_param = list(camera_layout) if camera_layout else None
         self._max_hours = max_hours
         self._subsample_seed = int(subsample_seed)
+        self._normalize_prompt = bool(normalize_prompt)
 
         # ── load-time video augmentation ──────────────────────────────────
         # Color jitter is applied in _getitem_impl to the decoded clip (same
@@ -870,6 +875,8 @@ class LeRobotV3Reader(BaseDataset):
 
         # 2) prompt (hook)
         prompt = self._resolve_prompt(row, win)
+        if self._normalize_prompt:
+            prompt = _normalize_prompt(prompt)
 
         # 3) action + 4) proprio (hooks → normalized 20-D payload or None)
         action, action_mask = self._finalize_action(self._action_20d(win), actual_raw_len)
@@ -1152,6 +1159,7 @@ class LeRobotV3Reader(BaseDataset):
         "unify_action_map",
         "unify_state_map",
         "color_jitter",
+        "normalize_prompt",
     )
 
     @classmethod

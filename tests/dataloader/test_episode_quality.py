@@ -37,7 +37,9 @@ def test_prompt_ok():
     assert eq.prompt_ok("丢垃圾") and eq.prompt_ok("使用键盘打字：I am a robot.")
     assert not eq.prompt_ok("丢")
     for bad in ("", "  ", "N/A", "task", "do something", "123", "go",
-                "Move the shoe to the book with left arm, and move the  to the book with right arm.", "Pick up the."):
+                "Move the shoe to the book with left arm, and move the  to the book with right arm.", "Pick up the.",
+                "Pair the cups with with same-color plates.", "fold_mat", "hit-ball-with-gripper-to-score-goal",
+                "Close the microwave_gr with left arm", "Galbot_G1_Clean_the_sink_1"):
         assert not eq.prompt_ok(bad), bad
     assert eq.prompt_ok("Pick up the pen and write the letter A.")
     assert eq.prompt_ok("find blocks with the letters b, a, a, and i")

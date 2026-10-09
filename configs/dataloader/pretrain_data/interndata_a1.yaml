@@ -48,6 +48,11 @@ color_jitter:
 #       [--trim_csv /path/to/trim.csv] --split train
 normalize_mode: quantile
 
+# Rewrite task text into one style before encoding: slug / asset-ID tokens to
+# words, drop "please", capitalize, end with a period (prompt_text.normalize_prompt).
+# Eval prompts for a model trained this way should go through the same function.
+normalize_prompt: true
+
 # false keeps values available but masks action and proprio supervision.
 enable_action_supervision: true
 
