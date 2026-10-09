@@ -127,7 +127,9 @@
   - DROID success 重扫带 `--video`（`--bucket-shards 24`，24 worker）：命中 3,508/57,639 集（`bad_prompt` 3,105 全是指令 `" |  | "`、`too_long` 1,204、`static` 111、`too_short` 54、`black_video` 26、`frozen_video` 20、`bad_video` 1）。用户决定：只排除空指令、`too_long` 也排除、补视频检查。`prompt_ok` 改为 " | " 连接的标注变体只要有一个可用即通过。剩 54,131 集 / 14,222,740 帧 / 263.38 h。复制到 `/mnt/data/filter_datasets/Cosmos3-DROID_lerobotv3/success`（628 GB，核对一致，含被排除集），在副本 `--quality droid_v2/quality.parquet --apply` 写 `excluded_episodes.json`（3,508，loader 读回 3,508）。**DROID / LIBERO 的归一化统计和读取器还没做**。
   - `episode_quality` 新增 `--bucket-shards N`（一个 bucket 的数据文件分给 N 个进程）。
   - Notion「单臂桌面操作数据集」：DROID success、LIBERO 5 套件已标「已完成」并填筛选后数据；OXE 35 个子集已排队（29 个单臂候选「待确认」、6 个移动/四足/双臂「未纳入」），都还没质检。
-- 下一步：OXE（已是 v3.0，但 state/action 语义各异、5–10 Hz 低分辨率，需要逐个确认位姿列再写适配）；RoboMIND / RoboMIND2.0 Franka·UR5 / RoboCOIN 单臂桶 / oxe-auge 等要转格式；Meta-World 是否纳入待用户定；DROID 与 LIBERO 的 stats / reader。
+- **OXE 标准 Franka/UR5 五个已入库（2026-10-09）**：`OXE_SPECS` 按 bucket 名适配——stanford_hydra（xyz+欧拉，夹爪 state[7]）、taco_play（xyz+欧拉，夹爪 state[6]）、berkeley_autolab_ur5（xyz+四元数 xyzw 假设，夹爪取 action[6]）、utaustin_mutex / toto（7 个 Franka 关节角 → `franka_fk`，用 ready 位姿核对 TCP=(0.307,0,0.487)；mutex 夹爪 state[7]，toto 取 action[6]）。dsw-4 `--video` 扫描：运动指标正常（单步 0.7–2.7 cm，无跳变命中），只命中 `bad_video` 19 条；toto 唯一指令 "pour" 只有一个词，按规则全部 `bad_prompt`，决定保留。复制到 `/mnt/data/filter_datasets/OXE_lerobotv3/<bucket>`（共约 26 GB，核对一致），副本 `--apply` 写入排除。保留：ur5 997 集/5.43 h、hydra 567/9.89 h、taco 3,602/4.40 h、toto 993/2.98 h、mutex 1,498/5.02 h；Notion 已更新。utaustin_mutex 指令是带 `\n` 和 `tf.Tensor(b"...")` 包装的冗长改写，没清理。
+- 踩坑：`--bucket-shards` 下某个分片为空时 `pd.concat` 会把 bool 列变 object，`~prompt_ok` 变成按位取反导致全部 `bad_prompt`；已改为只合并非空分片。已写出的 quality.parquet 如果是在修复前生成，需要先把 bool/int 列转回再 `--quality` 复用。
+- 下一步：OXE 其余 24 个单臂候选（state/action 语义各异、5–10 Hz 低分辨率，逐个确认位姿列再加到 `OXE_SPECS`）；RoboMIND / RoboMIND2.0 Franka·UR5 / RoboCOIN 单臂桶 / oxe-auge 等要转格式；Meta-World 是否纳入待用户定；DROID 与 LIBERO 的 stats / reader。
 
 ## 夹爪事件子任务切分（2026-10-09）
 

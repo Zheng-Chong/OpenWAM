@@ -175,3 +175,20 @@ def test_single_arm_droid_libero():
 def test_prompt_ok_variants():
     assert eq.prompt_ok("Put the cup in the the bowl | Put the cup in the bowl | Stack the cups")
     assert not eq.prompt_ok(" |  | ")
+
+
+def test_franka_fk_and_oxe_specs():
+    import pyarrow as pa
+
+    q = np.array([[0, -np.pi / 4, 0, -3 * np.pi / 4, 0, np.pi / 2, np.pi / 4]])  # Panda "ready" pose
+    xyz, mat = eq.franka_fk(q)
+    assert np.allclose(xyz[0], [0.307, 0, 0.487], atol=2e-3)
+    assert np.allclose(mat[0], np.diag([1, -1, -1]), atol=1e-6)  # TCP z pointing down
+
+    state = np.c_[np.tile(q, (4, 1)), np.full(4, 0.05)]
+    t = pa.table({eq.LIBERO_STATE_COL: list(state), "action": [[0.0] * 6 + [1.0]] * 4})
+    pose, eff = eq._single_arm(t, set(t.column_names), None, "utaustin_mutex")
+    assert pose.shape == (4, 9) and np.allclose(eff[0], 0.05)
+    _, eff = eq._single_arm(t, set(t.column_names), None, "toto")
+    assert np.allclose(eff[0], 1.0)  # no state gripper → action[6]
+    assert eq._single_arm(t, set(t.column_names), None, "other") is None

@@ -73,7 +73,7 @@ EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
 # 18-D ee_base = [L_xyz, L_rot6d, R_xyz, R_rot6d]
 ARMS = ((slice(0, 3), slice(3, 9)), (slice(9, 12), slice(12, 18)))
 HEAD_CAMERAS = (
-    "observation.images.head", "images.rgb.head",
+    "observation.images.head", "images.rgb.head", "observation.images.rgb_static",  # TACO Play
     "observation.image.exterior_image_1_left",  # DROID
     "observation.images.image",  # LIBERO
 )
@@ -84,6 +84,18 @@ INTERN_GRIPPER_COLS = ("states.left_gripper.position", "states.right_gripper.pos
 # two finger positions in m; their difference / 0.08 ≈ [0,1] aperture)
 DROID_POSE_COL, DROID_GRIPPER_COL = "observation.state.cartesian_position", "observation.state.gripper_position"
 LIBERO_STATE_COL = "observation.state"
+# OXE single-arm sets, keyed by bucket name: (state layout, gripper column in state or None → action[:, 6]).
+# "euler" = xyz + euler xyz, "quat" = xyz + quaternion xyzw, "franka_q" = 7 Franka joint angles (forward kinematics)
+OXE_SPECS = {
+    "stanford_hydra_dataset": ("euler", 7),
+    "taco_play": ("euler", 6),
+    "berkeley_autolab_ur5": ("quat", None),
+    "utaustin_mutex": ("franka_q", 7),
+    "toto": ("franka_q", None),
+}
+# Panda modified-DH rows (alpha_{i-1}, a_{i-1}, d_i) + flange 0.107 m, hand rotation -45° about z, TCP 0.1034 m
+_PANDA_DH = ((0, 0, 0.333), (-np.pi / 2, 0, 0), (np.pi / 2, 0, 0.316), (np.pi / 2, 0.0825, 0),
+             (-np.pi / 2, -0.0825, 0.384), (np.pi / 2, 0, 0), (np.pi / 2, 0.088, 0))
 CHASSIS_CMD_COL, TORSO_COL = "action.chassis.velocities", "observation.state.torso"
 # optional per-episode columns converters write into meta/episodes, copied into the scan
 EPISODE_EXTRAS = {"bad_image_frames": 0, "unqualified_frames": 0, "coarse_quality": "", "bag_quality": ""}
@@ -166,10 +178,39 @@ def _column(table, name: str) -> np.ndarray:
     return np.stack(table[name].to_numpy(zero_copy_only=False)).astype(np.float64).reshape(len(table), -1)
 
 
-def _single_arm(win, names: set, robot_type: str | None):
+def franka_fk(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(T,7) Panda joint angles → TCP xyz (T,3) and rotation matrices (T,3,3), robot base frame."""
+    T = np.broadcast_to(np.eye(4), (len(q), 4, 4)).copy()
+    for (alpha, a, d), theta in zip(_PANDA_DH, q.T):
+        ca, sa, ct, st = np.cos(alpha), np.sin(alpha), np.cos(theta), np.sin(theta)
+        A = np.zeros((len(q), 4, 4))
+        A[:, 0, 0], A[:, 0, 1], A[:, 0, 3] = ct, -st, a
+        A[:, 1, 0], A[:, 1, 1], A[:, 1, 2], A[:, 1, 3] = st * ca, ct * ca, -sa, -sa * d
+        A[:, 2, 0], A[:, 2, 1], A[:, 2, 2], A[:, 2, 3] = st * sa, ct * sa, ca, ca * d
+        A[:, 3, 3] = 1
+        T = T @ A
+    hand = np.eye(4)
+    hand[:2, :2] = [[np.cos(-np.pi / 4), -np.sin(-np.pi / 4)], [np.sin(-np.pi / 4), np.cos(-np.pi / 4)]]
+    hand[2, 3] = 0.107 + 0.1034
+    T = T @ hand
+    return T[:, :3, 3], T[:, :3, :3]
+
+
+def _single_arm(win, names: set, robot_type: str | None, bucket: str = ""):
     """(pose (T,9), [effector (T,1)]) for DROID / LIBERO windows, else None."""
     from scipy.spatial.transform import Rotation
 
+    if bucket in OXE_SPECS:
+        kind, grip = OXE_SPECS[bucket]
+        x = _column(win, LIBERO_STATE_COL)
+        eff = [x[:, grip : grip + 1] if grip is not None else _column(win, "action")[:, 6:7]]
+        if kind == "franka_q":
+            xyz, mat = franka_fk(np.nan_to_num(x[:, :7]))
+            return np.concatenate([xyz, mat[:, :, 0], mat[:, :, 1]], 1), eff
+        rot = (Rotation.from_euler("xyz", np.nan_to_num(x[:, 3:6])) if kind == "euler"
+               else Rotation.from_quat(np.nan_to_num(x[:, 3:7]) + [0, 0, 0, 1e-9]))
+        m = rot.as_matrix()
+        return np.concatenate([x[:, :3], m[:, :, 0], m[:, :, 1]], 1), eff
     if DROID_POSE_COL in names:
         x, eff = _column(win, DROID_POSE_COL), [_column(win, DROID_GRIPPER_COL)]
         rot = Rotation.from_euler("xyz", np.nan_to_num(x[:, 3:6]))
@@ -219,12 +260,13 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5, shard:
         path = root / info["data_path"].format(chunk_index=chunk, file_index=file)
         names = set(pq.read_schema(path).names)
         single = POSE_COL not in names and (
-            DROID_POSE_COL in names or (LIBERO_STATE_COL in names and info.get("robot_type") == "franka")
+            DROID_POSE_COL in names or root.name in OXE_SPECS
+            or (LIBERO_STATE_COL in names and info.get("robot_type") == "franka")
         )
         intern = POSE_COL not in names and not single
         pose_cols, eff_cols = (INTERN_POSE_COLS, INTERN_GRIPPER_COLS) if intern else ((POSE_COL,), EFFECTOR_COLS)
         if single:
-            pose_cols, eff_cols = (DROID_POSE_COL, LIBERO_STATE_COL), (DROID_GRIPPER_COL,)
+            pose_cols, eff_cols = (DROID_POSE_COL, LIBERO_STATE_COL, "action"), (DROID_GRIPPER_COL,)
         cols = [c for c in (*pose_cols, *eff_cols, CHASSIS_CMD_COL, TORSO_COL, "task_index") if c in names]
         table = pq.read_table(path, columns=cols)
         for _, ep in group.iterrows():
@@ -238,7 +280,7 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5, shard:
             if TORSO_COL in cols:
                 r["torso_range"] = float(np.ptp(np.stack(win[TORSO_COL].to_numpy(zero_copy_only=False)), axis=0).max())
             if single:
-                pose, eff = _single_arm(win, names, info.get("robot_type"))
+                pose, eff = _single_arm(win, names, info.get("robot_type"), root.name)
                 raw = [pose]
             else:
                 raw = [_column(win, c) for c in pose_cols]
@@ -402,7 +444,7 @@ def main():
         with ProcessPoolExecutor(a.workers) as pool:
             n = a.bucket_shards
             futs = [(b, pool.submit(scan_bucket, str(root / b), a.video, 5, (i, n))) for b in buckets for i in range(n)]
-            df = pd.concat([f.result().assign(bucket=b) for b, f in futs], ignore_index=True)
+            df = pd.concat([r.assign(bucket=b) for b, f in futs if len(r := f.result())], ignore_index=True)  # empty shards would turn bool columns into object
             df = df.sort_values(["bucket", "episode_index"], ignore_index=True)
     fps = {b: float(parse_info_json(root / b)["fps"]) for b in buckets}
     df["reasons"] = flag(df, a, fps)
