@@ -130,7 +130,7 @@ def _convert_episodes(lance_path: str, out: str, jobs: list[dict], crf: int, unk
         ep = tb.column("episode_index").to_numpy()
         fr = tb.column("frame_index").to_numpy()
         n = len(fr)
-        if not ((ep == j["episode_index"]).all() and (fr == np.arange(n)).all()):
+        if not ((ep == ep[0]).all() and (fr == np.arange(n)).all()):  # raw ids may skip; require one ordered episode
             raise ValueError(f"episode {j['episode_index']}: rows {j['from']}:{j['to']} are not one ordered episode")
         state = np.asarray(tb.column("observation_state").to_pylist(), dtype=np.float64)
         action = np.asarray(tb.column("action").to_pylist(), dtype=np.float64)

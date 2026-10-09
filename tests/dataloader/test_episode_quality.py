@@ -151,3 +151,22 @@ def test_scan_interndata_bucket(tmp_path):
     a = argparse.Namespace(min_seconds=2.0, max_len_x_median=5.0, max_step_m=0.10, max_step_deg=20.0,
                            min_path_m=0.05, min_effector_range=0.05)
     assert eq.flag(df, a, {"task": 30.0}).tolist() == ["", "pos_jump"]
+
+
+def test_single_arm_droid_libero():
+    import pyarrow as pa
+
+    xyz = np.zeros((5, 3))
+    xyz[:, 0] = np.arange(5) * 0.01
+    droid = pa.table({
+        eq.DROID_POSE_COL: list(np.c_[xyz, np.zeros((5, 3))]), eq.DROID_GRIPPER_COL: [[0.0]] * 5,
+    })
+    pose, eff = eq._single_arm(droid, set(droid.column_names), "panda")
+    assert pose.shape == (5, 9) and np.allclose(pose[:, 3:9], [1, 0, 0, 0, 1, 0])  # identity rot6d
+    assert np.isclose(eq.pose_metrics(pose)["max_step_m"], 0.01) and eq.pose_metrics(pose)["rot6d_err"] < 1e-9
+
+    state = np.c_[xyz, np.tile([0, 0, np.pi / 2], (5, 1)), np.full(5, 0.04), np.full(5, -0.04)]
+    libero = pa.table({eq.LIBERO_STATE_COL: list(state)})
+    pose, eff = eq._single_arm(libero, {eq.LIBERO_STATE_COL}, "franka")
+    assert np.allclose(pose[0, 3:9], [0, 1, 0, -1, 0, 0]) and np.allclose(eff[0], 1.0)  # 90° about z, open
+    assert eq._single_arm(libero, {eq.LIBERO_STATE_COL}, "aloha") is None

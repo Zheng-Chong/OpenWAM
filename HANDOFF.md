@@ -116,6 +116,14 @@
 - 其余发现（措辞、大小写、重复词 "with with"/"the the"、RoboPro "please"、RoboCOIN 942 条未用 task 与 32 集空 tasks、Galaxea tasks 表里的 `qualified`/`unqualified`）只记录，未处理。
 - dsw-8 的 `/mnt/data` ossfs 在 2026-10-09 上午断开（传输端点尚未连接），需平台重挂。
 
+## 单臂数据集清洗（2026-10-09 起）
+
+- 范围（用户决定）：全部单臂、无移动/升降底盘的数据，含仿真（类型填「仿真」）；入库目录是 OSS `/mnt/data/filter_datasets`（用户说的 filtered_datasets 实际不存在）。Notion 库「单臂桌面操作数据集」（Data 质检 页下，结构同双臂库，类型里「单臂 UMI」），已写入 DROID success/failure、LIBERO 5 套件、Meta-World，状态「待确认」。
+- 盘点结论（只读各数据集前几个桶的 `info.json`，不递归扫 OSS）：已是 v3 的单臂有 Cosmos3-DROID（success 57,639 集 / 346.13 h，failure 不纳入）、LIBERO（libero_90/10/goal/object/spatial，合计约 11.7 h）、Meta-World-MT50（仅 4 维 state、无视频，能否用待定）。DuoBench 是双臂；`OXE/droid_1.0.1` 与 Cosmos3-DROID 重叠，先不收。未判定、需转格式：OXE 单臂子集（`aloha_*` 双臂排除）、oxe-auge、RoboMIND、RoboMIND2.0 Franka/UR5、RoboCOIN 单臂桶、RoboFAC、ManiSkill-fail、10Kh-RealOmin、ManipArena；RoboCasa 带底盘大概率排除。G1D 自采里 `MoveibleLift` 本体带升降，不算。
+- `episode_quality` 新增单臂：DROID（`observation.state.cartesian_position` xyz + 欧拉角、`gripper_position`）和 LIBERO（8 维 `observation.state` xyz + 轴角 + 两指位置，夹爪 = 指差 / 0.08），都转成 1 臂 xyz + rot6d，其余规则不变；头部相机加了 DROID `exterior_image_1_left` 和 LIBERO `image`。单测 `test_single_arm_droid_libero`；dsw-4 `pytest tests/dataloader/test_episode_quality.py` → 7 passed。
+- 扫描在 dsw-4（代码 `/root/owam_single/repo`，源数据只读，未 apply）：LIBERO 带 `--video` → `/root/single_quality/libero`；DROID success 单进程、不带视频 → `/root/single_quality/droid`，日志 `/root/single_quality_droid.log`（并行是一个 bucket 一个进程，57k 集的单 bucket 会很慢；视频检查要不要补，看结果再定）。**结果还没看**。
+- 下一步：看两个 `summary.json` → 用户确认阈值 → 复制到 `filter_datasets` 后在副本上 `--apply` → 算统计 → 更新 Notion（筛选后小时数、状态）；再处理 OXE / RoboMIND 等需要转格式的。
+
 ## 剩余事项与风险
 
 - AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
@@ -142,6 +150,7 @@
 
 ## 最近历史
 
+- 2026-10-09：`episode_quality` 支持 DROID / LIBERO 单臂；单臂数据集 Notion 库建立，DROID 与 LIBERO 扫描进行中。
 - 2026-09-30：InternData-A1 仿真 lift2/split_aloha 解压到 OSS；`episode_quality` 支持 A1 列格式与清单文件编号错位，全量扫描进行中。
 - 2026-09-30：新增 Hy-Embodied、Galaxea 转换和 official/bag/body_motion 等清洗规则；Galaxea 桌面子集写入 OSS；Hy 全量转换、lingbot FK 进行中。
 

@@ -39,6 +39,10 @@ Mobile-base statistics (``chassis_cmd_frac`` = share of frames with a nonzero
 of ``observation.state.torso``) are always recorded; they only flag episodes
 when the ``body_motion`` thresholds are given.
 
+Single-arm Franka buckets are scanned from DROID's ``observation.state.cartesian_position``
+(xyz + euler) / ``gripper_position`` or LIBERO's 8-D ``observation.state`` (xyz + axis-angle +
+two fingers); the pose is converted to one xyz + rot6d arm, so all rules apply unchanged.
+
 Buckets without ``ee_base`` but with InternData-A1's ``states.{left,right}_ee_to_robot_pose``
 (xyz + quaternion wxyz) are scanned from those columns, with grippers scaled to the
 reader's [0, 1] aperture. Buckets are found recursively (bucket = path under root).
@@ -68,10 +72,18 @@ POSE_COL = "observation.state.ee_base"
 EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
 # 18-D ee_base = [L_xyz, L_rot6d, R_xyz, R_rot6d]
 ARMS = ((slice(0, 3), slice(3, 9)), (slice(9, 12), slice(12, 18)))
-HEAD_CAMERAS = ("observation.images.head", "images.rgb.head")
+HEAD_CAMERAS = (
+    "observation.images.head", "images.rgb.head",
+    "observation.image.exterior_image_1_left",  # DROID
+    "observation.images.image",  # LIBERO
+)
 # InternData-A1: per-arm xyz + quaternion wxyz; grippers in native stroke units
 INTERN_POSE_COLS = ("states.left_ee_to_robot_pose", "states.right_ee_to_robot_pose")
 INTERN_GRIPPER_COLS = ("states.left_gripper.position", "states.right_gripper.position")
+# Single-arm Franka sets: DROID (xyz + euler "xyz", gripper [0,1]) and LIBERO (xyz + axis-angle,
+# two finger positions in m; their difference / 0.08 ≈ [0,1] aperture)
+DROID_POSE_COL, DROID_GRIPPER_COL = "observation.state.cartesian_position", "observation.state.gripper_position"
+LIBERO_STATE_COL = "observation.state"
 CHASSIS_CMD_COL, TORSO_COL = "action.chassis.velocities", "observation.state.torso"
 # optional per-episode columns converters write into meta/episodes, copied into the scan
 EPISODE_EXTRAS = {"bad_image_frames": 0, "unqualified_frames": 0, "coarse_quality": "", "bag_quality": ""}
@@ -87,9 +99,9 @@ def _rot6d_to_mat(r6: np.ndarray) -> np.ndarray:
 
 
 def pose_metrics(pose: np.ndarray) -> dict:
-    """Motion metrics over both arms of an (T,18) ee_base track."""
+    """Motion metrics over every arm of a (T, 9·arms) track: xyz + rot6d per arm."""
     out = {"max_step_m": 0.0, "max_step_deg": 0.0, "path_m": 0.0, "rot6d_err": 0.0}
-    for xyz_s, rot_s in ARMS:
+    for xyz_s, rot_s in ARMS[: pose.shape[1] // 9]:
         xyz, r6 = pose[:, xyz_s], pose[:, rot_s]
         out["rot6d_err"] = max(
             out["rot6d_err"],
@@ -152,6 +164,22 @@ def _column(table, name: str) -> np.ndarray:
     return np.stack(table[name].to_numpy(zero_copy_only=False)).astype(np.float64).reshape(len(table), -1)
 
 
+def _single_arm(win, names: set, robot_type: str | None):
+    """(pose (T,9), [effector (T,1)]) for DROID / LIBERO windows, else None."""
+    from scipy.spatial.transform import Rotation
+
+    if DROID_POSE_COL in names:
+        x, eff = _column(win, DROID_POSE_COL), [_column(win, DROID_GRIPPER_COL)]
+        rot = Rotation.from_euler("xyz", np.nan_to_num(x[:, 3:6]))
+    elif LIBERO_STATE_COL in names and robot_type == "franka":
+        x = _column(win, LIBERO_STATE_COL)
+        rot, eff = Rotation.from_rotvec(np.nan_to_num(x[:, 3:6])), [(x[:, 6:7] - x[:, 7:8]) / 0.08]
+    else:
+        return None
+    m = rot.as_matrix()
+    return np.concatenate([x[:, :3], m[:, :, 0], m[:, :, 1]], 1), eff
+
+
 def _relocate_by_global_index(root: Path, eps: pd.DataFrame) -> None:
     """Place episodes by ``dataset_from_index`` against physical shard lengths (as InternDataA1 does)."""
     shards = iter_data_shards(root)
@@ -186,8 +214,13 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
     for (chunk, file), group in eps.groupby(["data/chunk_index", "data/file_index"]):
         path = root / info["data_path"].format(chunk_index=chunk, file_index=file)
         names = set(pq.read_schema(path).names)
-        intern = POSE_COL not in names
+        single = POSE_COL not in names and (
+            DROID_POSE_COL in names or (LIBERO_STATE_COL in names and info.get("robot_type") == "franka")
+        )
+        intern = POSE_COL not in names and not single
         pose_cols, eff_cols = (INTERN_POSE_COLS, INTERN_GRIPPER_COLS) if intern else ((POSE_COL,), EFFECTOR_COLS)
+        if single:
+            pose_cols, eff_cols = (DROID_POSE_COL, LIBERO_STATE_COL), (DROID_GRIPPER_COL,)
         cols = [c for c in (*pose_cols, *eff_cols, CHASSIS_CMD_COL, TORSO_COL, "task_index") if c in names]
         table = pq.read_table(path, columns=cols)
         for _, ep in group.iterrows():
@@ -200,13 +233,17 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
                 r["chassis_cmd_frac"] = float((np.abs(cmd).max(axis=1) > 1e-3).mean())
             if TORSO_COL in cols:
                 r["torso_range"] = float(np.ptp(np.stack(win[TORSO_COL].to_numpy(zero_copy_only=False)), axis=0).max())
-            raw = [_column(win, c) for c in pose_cols]
-            eff = [_column(win, c) / grip_scale.get(c, 1.0) for c in eff_cols if c in cols]
+            if single:
+                pose, eff = _single_arm(win, names, info.get("robot_type"))
+                raw = [pose]
+            else:
+                raw = [_column(win, c) for c in pose_cols]
+                eff = [_column(win, c) / grip_scale.get(c, 1.0) for c in eff_cols if c in cols]
             r["nonfinite"] = not all(np.isfinite(x).all() for x in (*raw, *eff))
-            pose = np.concatenate(
+            pose = pose if single else np.concatenate(
                 [np.concatenate([a[:, :3], quat_wxyz_to_rot6d(np.nan_to_num(a[:, 3:]))], 1) for a in raw], 1
             ).astype(np.float64) if intern else raw[0]
-            r["zero_pose_frames"] = int(sum((np.abs(pose[:, xyz]).sum(1) == 0).sum() for xyz, _ in ARMS))
+            r["zero_pose_frames"] = int(sum((np.abs(pose[:, xyz]).sum(1) == 0).sum() for xyz, _ in ARMS[: pose.shape[1] // 9]))
             r.update(pose_metrics(np.nan_to_num(pose)) if not r["nonfinite"] else {})
             r["effector_range"] = float(max((np.ptp(e, axis=0).max() for e in eff), default=0.0))
             r["prompt_ok"] = all(prompt_ok(task_text.get(int(t), "")) for t in set(win["task_index"].to_pylist()))
