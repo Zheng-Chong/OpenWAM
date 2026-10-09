@@ -122,7 +122,12 @@
 - 盘点结论（只读各数据集前几个桶的 `info.json`，不递归扫 OSS）：已是 v3 的单臂有 Cosmos3-DROID（success 57,639 集 / 346.13 h，failure 不纳入）、LIBERO（libero_90/10/goal/object/spatial，合计约 11.7 h）、Meta-World-MT50（仅 4 维 state、无视频，能否用待定）。DuoBench 是双臂；`OXE/droid_1.0.1` 与 Cosmos3-DROID 重叠，先不收。未判定、需转格式：OXE 单臂子集（`aloha_*` 双臂排除）、oxe-auge、RoboMIND、RoboMIND2.0 Franka/UR5、RoboCOIN 单臂桶、RoboFAC、ManiSkill-fail、10Kh-RealOmin、ManipArena；RoboCasa 带底盘大概率排除。G1D 自采里 `MoveibleLift` 本体带升降，不算。
 - `episode_quality` 新增单臂：DROID（`observation.state.cartesian_position` xyz + 欧拉角、`gripper_position`）和 LIBERO（8 维 `observation.state` xyz + 轴角 + 两指位置，夹爪 = 指差 / 0.08），都转成 1 臂 xyz + rot6d，其余规则不变；头部相机加了 DROID `exterior_image_1_left` 和 LIBERO `image`。单测 `test_single_arm_droid_libero`；dsw-4 `pytest tests/dataloader/test_episode_quality.py` → 7 passed。
 - 扫描在 dsw-4（代码 `/root/owam_single/repo`，源数据只读，未 apply）：LIBERO 带 `--video` → `/root/single_quality/libero`；DROID success 单进程、不带视频 → `/root/single_quality/droid`，日志 `/root/single_quality_droid.log`（并行是一个 bucket 一个进程，57k 集的单 bucket 会很慢；视频检查要不要补，看结果再定）。**结果还没看**。
-- 下一步：看两个 `summary.json` → 用户确认阈值 → 复制到 `filter_datasets` 后在副本上 `--apply` → 算统计 → 更新 Notion（筛选后小时数、状态）；再处理 OXE / RoboMIND 等需要转格式的。
+- **已完成入库（2026-10-09）**：
+  - LIBERO 5 套件 0 命中，原样复制到 `/mnt/data/filter_datasets/LIBERO_lerobotv3/<套件>`（4.2 GB，文件数/字节核对一致）。
+  - DROID success 重扫带 `--video`（`--bucket-shards 24`，24 worker）：命中 3,508/57,639 集（`bad_prompt` 3,105 全是指令 `" |  | "`、`too_long` 1,204、`static` 111、`too_short` 54、`black_video` 26、`frozen_video` 20、`bad_video` 1）。用户决定：只排除空指令、`too_long` 也排除、补视频检查。`prompt_ok` 改为 " | " 连接的标注变体只要有一个可用即通过。剩 54,131 集 / 14,222,740 帧 / 263.38 h。复制到 `/mnt/data/filter_datasets/Cosmos3-DROID_lerobotv3/success`（628 GB，核对一致，含被排除集），在副本 `--quality droid_v2/quality.parquet --apply` 写 `excluded_episodes.json`（3,508，loader 读回 3,508）。**DROID / LIBERO 的归一化统计和读取器还没做**。
+  - `episode_quality` 新增 `--bucket-shards N`（一个 bucket 的数据文件分给 N 个进程）。
+  - Notion「单臂桌面操作数据集」：DROID success、LIBERO 5 套件已标「已完成」并填筛选后数据；OXE 35 个子集已排队（29 个单臂候选「待确认」、6 个移动/四足/双臂「未纳入」），都还没质检。
+- 下一步：OXE（已是 v3.0，但 state/action 语义各异、5–10 Hz 低分辨率，需要逐个确认位姿列再写适配）；RoboMIND / RoboMIND2.0 Franka·UR5 / RoboCOIN 单臂桶 / oxe-auge 等要转格式；Meta-World 是否纳入待用户定；DROID 与 LIBERO 的 stats / reader。
 
 ## 剩余事项与风险
 

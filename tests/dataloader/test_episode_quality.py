@@ -170,3 +170,8 @@ def test_single_arm_droid_libero():
     pose, eff = eq._single_arm(libero, {eq.LIBERO_STATE_COL}, "franka")
     assert np.allclose(pose[0, 3:9], [0, 1, 0, -1, 0, 0]) and np.allclose(eff[0], 1.0)  # 90° about z, open
     assert eq._single_arm(libero, {eq.LIBERO_STATE_COL}, "aloha") is None
+
+
+def test_prompt_ok_variants():
+    assert eq.prompt_ok("Put the cup in the the bowl | Put the cup in the bowl | Stack the cups")
+    assert not eq.prompt_ok(" |  | ")

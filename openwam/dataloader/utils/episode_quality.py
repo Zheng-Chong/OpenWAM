@@ -121,6 +121,8 @@ def pose_metrics(pose: np.ndarray) -> dict:
 
 
 def prompt_ok(text: str) -> bool:
+    if " | " in (text or ""):  # DROID: several annotator variants joined by " | "; one usable variant is enough
+        return any(prompt_ok(v) for v in text.split(" | "))
     text = (text or "").strip()
     words = len(re.findall(r"[A-Za-z]{2,}", text)) + len(re.findall(r"[\u4e00-\u9fff]", text))  # CJK: per character
     return (
@@ -193,7 +195,7 @@ def _relocate_by_global_index(root: Path, eps: pd.DataFrame) -> None:
     eps["_row"] = g - starts[pos]
 
 
-def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.DataFrame:
+def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5, shard: tuple[int, int] = (0, 1)) -> pd.DataFrame:
     root = Path(bucket)
     info = parse_info_json(root)
     eps = load_episodes_parquet(root)
@@ -211,7 +213,9 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5) -> pd.
         grip_scale = {c: resolve_gripper_scale(root, emb, c) for c in INTERN_GRIPPER_COLS}
 
     rows = []
-    for (chunk, file), group in eps.groupby(["data/chunk_index", "data/file_index"]):
+    for k, ((chunk, file), group) in enumerate(eps.groupby(["data/chunk_index", "data/file_index"])):
+        if k % shard[1] != shard[0]:  # --bucket-shards: every n-th data file
+            continue
         path = root / info["data_path"].format(chunk_index=chunk, file_index=file)
         names = set(pq.read_schema(path).names)
         single = POSE_COL not in names and (
@@ -368,6 +372,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--buckets", nargs="*")
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--bucket-shards", type=int, default=1, help="split each bucket's data files over N processes")
     ap.add_argument("--video", action="store_true", help="also decode sampled head frames")
     ap.add_argument("--quality", help="reuse an existing quality.parquet instead of rescanning")
     mode = ap.add_mutually_exclusive_group()
@@ -395,8 +400,10 @@ def main():
         df = df[df["bucket"].isin(buckets)].reset_index(drop=True)
     else:
         with ProcessPoolExecutor(a.workers) as pool:
-            futs = {b: pool.submit(scan_bucket, str(root / b), a.video) for b in buckets}
-            df = pd.concat([f.result().assign(bucket=b) for b, f in futs.items()], ignore_index=True)
+            n = a.bucket_shards
+            futs = [(b, pool.submit(scan_bucket, str(root / b), a.video, 5, (i, n))) for b in buckets for i in range(n)]
+            df = pd.concat([f.result().assign(bucket=b) for b, f in futs], ignore_index=True)
+            df = df.sort_values(["bucket", "episode_index"], ignore_index=True)
     fps = {b: float(parse_info_json(root / b)["fps"]) for b in buckets}
     df["reasons"] = flag(df, a, fps)
 
