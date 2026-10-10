@@ -92,6 +92,14 @@ OXE_SPECS = {
     "berkeley_autolab_ur5": ("quat", None),
     "utaustin_mutex": ("franka_q", 7),
     "toto": ("franka_q", None),
+    "austin_sailor_dataset": ("quat", 7),
+    "jaco_play": ("quat", 7),
+    "kaist_nonprehensile": ("quat", None),
+    "stanford_kuka_multimodal_dataset": ("quat", None),
+    "berkeley_rpt": ("franka_q", 7),
+    "austin_sirius_dataset": ("franka_q", 7),
+    "austin_buds_dataset": ("franka_q", 7),  # state[:8] = joints + gripper, rest is the flattened EE matrix
+    "cmu_play_fusion": ("franka_q", 7),
 }
 # Panda modified-DH rows (alpha_{i-1}, a_{i-1}, d_i) + flange 0.107 m, hand rotation -45° about z, TCP 0.1034 m
 _PANDA_DH = ((0, 0, 0.333), (-np.pi / 2, 0, 0), (np.pi / 2, 0, 0.316), (np.pi / 2, 0.0825, 0),
