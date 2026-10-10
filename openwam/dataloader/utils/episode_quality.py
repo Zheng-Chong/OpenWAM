@@ -204,6 +204,16 @@ def franka_fk(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return T[:, :3, 3], T[:, :3, :3]
 
 
+def _fill_zero_rows(q: np.ndarray) -> np.ndarray:
+    """Replace all-zero joint rows (padding in austin_sirius / austin_buds) with the nearest valid row."""
+    zero = np.abs(q).sum(1) == 0
+    if not zero.any() or zero.all():
+        return q
+    valid = np.flatnonzero(~zero)
+    near = valid[np.abs(np.arange(len(q))[:, None] - valid[None]).argmin(1)]
+    return q[near]
+
+
 def _single_arm(win, names: set, robot_type: str | None, bucket: str = ""):
     """(pose (T,9), [effector (T,1)]) for DROID / LIBERO windows, else None."""
     from scipy.spatial.transform import Rotation
@@ -213,7 +223,7 @@ def _single_arm(win, names: set, robot_type: str | None, bucket: str = ""):
         x = _column(win, LIBERO_STATE_COL)
         eff = [x[:, grip : grip + 1] if grip is not None else _column(win, "action")[:, 6:7]]
         if kind == "franka_q":
-            xyz, mat = franka_fk(np.nan_to_num(x[:, :7]))
+            xyz, mat = franka_fk(_fill_zero_rows(np.nan_to_num(x[:, :7])))
             return np.concatenate([xyz, mat[:, :, 0], mat[:, :, 1]], 1), eff
         rot = (Rotation.from_euler("xyz", np.nan_to_num(x[:, 3:6])) if kind == "euler"
                else Rotation.from_quat(np.nan_to_num(x[:, 3:7]) + [0, 0, 0, 1e-9]))

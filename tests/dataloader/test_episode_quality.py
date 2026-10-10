@@ -192,3 +192,11 @@ def test_franka_fk_and_oxe_specs():
     _, eff = eq._single_arm(t, set(t.column_names), None, "toto")
     assert np.allclose(eff[0], 1.0)  # no state gripper → action[6]
     assert eq._single_arm(t, set(t.column_names), None, "other") is None
+
+
+def test_fill_zero_rows():
+    q = np.ones((6, 7)) * np.arange(1, 7)[:, None]
+    q[[0, 1, 4]] = 0  # leading padding + one hole
+    out = eq._fill_zero_rows(q)
+    assert (np.abs(out).sum(1) > 0).all() and out[0, 0] == 3 and out[4, 0] in (4, 6)
+    assert (eq._fill_zero_rows(np.zeros((3, 7))) == 0).all()  # nothing valid: unchanged
