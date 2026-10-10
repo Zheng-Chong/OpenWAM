@@ -1,6 +1,6 @@
 # Project Handoff
 
-更新时间：2026-10-09
+更新时间：2026-10-10
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
 当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
@@ -186,3 +186,18 @@
 - 2026-09-27：分析训练速度（瓶颈在计算，不在数据），新增训练端 prompt 编码缓存。
 - 2026-09-27：启动 G1 mid-train（全参，视频 / 动作分开设学习率，20000 步）。
 - 2026-09-27：新增 G1-Dex1 多任务读取器、共享统计量、离线评估脚本；DSW 上 debug 微调和离线评估均已跑通。
+
+## AtomBench-CobotMagic 转换与质检（2026-10-10）
+
+- 用户决定：先做 AtomBench，GenieSim3.0 先不纳入（源数据仍是未解包的 tar.gz 分卷，filter_datasets 无副本，无质检产物）。
+- `openwam/dataloader/utils/atombench_convert.py`：源 `/mnt/data/datasets/AtomBench-CobotMagic`（LeRobot v2.1，AgileX Cobot Magic 双 Piper 臂，15 任务 × 100 集，30 fps，每集每相机一个 H.264 mp4）→ 与 Galaxea 同布局的 v3 bucket（每任务一个 bucket、每集一个 parquet、mp4 原样复制不重编码、`meta/info.json` 最后写）。`python -m openwam.dataloader.utils.atombench_convert --src ... --out ... --workers 4`。
+- 列：`observation.state.ee_base` 18 维 `[L_xyz, L_rot6d, R_xyz, R_rot6d]`；`action.ee_base` = 下一帧状态；`observation.state.gripper` / `action.gripper` `[L, R]` 取 `clip(raw,0,1)`，0=闭合 1=张开；源 `observation.state`（26 维：右臂 `[j1..6, 夹爪, xyz, rx,ry,rz]` 后接左臂）和 `action`（14 维 leader 关节，右臂在前）原样透传。相机：`image_top→head`、`image_left→hand_left`、`image_right→hand_right`（后两者是腕部相机，已看画面确认左右对应）。
+- 核对：欧拉角是外旋 XYZ（`R=Rz·Ry·Rx`），用 Piper 正运动学（piper_sdk 的 DH）对关节角算位姿，位置误差 0.3 mm、旋转 Frobenius 误差 1e-3，所以直接用 `eef.euler_xyz_to_rot6d`。夹爪：全数据集 state 范围 ≈0..1、action 到 1.06（dm2 单任务只到 0.67–0.78，不能按单任务定标）；腕部相机在右手夹爪 0.78 时球刚落进篮子，0=闭合。
+- **位姿坐标系是各臂自己的基座系**，左右两个基座之间的横向偏移数据里没有（两臂起始位置都约 (-0.01, 0, 0.28)），所以 18 维里左右两半不在同一个机器人坐标系下；`info.json` 的 `pose_frame` 已写明。要接进共用坐标系需要标定值。
+- 源数据坑：dm3 / dm4 / di5 / di6 四个任务的 `frame_index` 从 43–86 起连续递增（源端裁了开头没重排），行数、timestamp、视频仍从 0 起且等于 `length`；转换时重排成 0..n-1，原起点记在 episodes 表 `source_frame_offset`。一开始检查写成"必须是 0..n-1"，这 4 个任务整体被跳过，已修。
+- 结果：15 个 bucket、1500/1500 集、1,330,905 帧（12.32 h，与源一致），8.2 GB，无跳过。`episode_quality --video`（8 worker，本地盘）0 命中：最大单步位移 5.2 cm（阈值 10 cm）、最大单步旋转 15.2°（阈值 20°）、视频全部可解码，未 apply。产物 dsw-share1 本地 `/root/AtomBench-CobotMagic-lerobotv3`（含 `quality_summary.json`），质检输出 `/root/atom_quality/`，转换代码副本 `/root/owam_atom`。
+- 已复制到 OSS：`/mnt/data/datasets/AtomBench-CobotMagic-lerobotv3` 和 `/mnt/data/filter_datasets/AtomBench-CobotMagic-lerobotv3`（`rsync -rL --size-only`）。`filter_datasets/MANIFEST.json` 是别人写的，没改。
+- 验证：dsw-share1 `pytest tests/dataloader/test_atombench_convert.py tests/dataloader/test_galaxea_convert.py` → 4 passed（含 frame_index 偏移用例）。
+- **未做**：没有 OpenWAM 读取器（Galaxea 也还没写）；没有算归一化统计；左右臂共用坐标系；GenieSim3.0。
+- 踩坑（已存记忆）：并行 `du`/`find` 扫 OSS 会让 ossfs2 被 OOM 杀掉，整台机器挂载断开（2026-10-09 在 dsw-8 发生）；视频解码类扫描也有同样风险，worker ≤4、放在没人用的机器上。本次转换把输出写在本地盘，质检读本地盘，没有碰 OSS 的视频解码。
+
