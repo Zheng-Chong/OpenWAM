@@ -73,7 +73,8 @@ EFFECTOR_COLS = ("observation.state.gripper", "observation.state.dex")
 # 18-D ee_base = [L_xyz, L_rot6d, R_xyz, R_rot6d]
 ARMS = ((slice(0, 3), slice(3, 9)), (slice(9, 12), slice(12, 18)))
 HEAD_CAMERAS = (
-    "observation.images.head", "images.rgb.head", "observation.images.rgb_static",  # TACO Play
+    "observation.images.head", "images.rgb.head", "observation.images.top_head",  # GenieSim
+    "observation.images.rgb_static",  # TACO Play
     "observation.image.exterior_image_1_left",  # DROID
     "observation.images.image",  # LIBERO
 )

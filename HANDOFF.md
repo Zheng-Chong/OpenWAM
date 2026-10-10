@@ -206,3 +206,17 @@
 - **未做**：没有 OpenWAM 读取器（Galaxea 也还没写）；没有算归一化统计；左右臂共用坐标系；GenieSim3.0。
 - 踩坑（已存记忆）：并行 `du`/`find` 扫 OSS 会让 ossfs2 被 OOM 杀掉，整台机器挂载断开（2026-10-09 在 dsw-8 发生）；视频解码类扫描也有同样风险，worker ≤4、放在没人用的机器上。本次转换把输出写在本地盘，质检读本地盘，没有碰 OSS 的视频解码。
 
+## GenieSim3.0 解包、转换与质检（2026-10-10）
+
+- 用户决定（反转了先前"先不纳入"）：解包并处理，末端位姿按方案 A（从 state 推断，坐标系未验证）。
+- 源：`/mnt/data/datasets/GenieSim3.0-Dataset/dataset_lerobot3.0/<任务>/g2_omnipicker/full/{meta,data,videos}.tar.gz.*`（65 任务，已是真正的 v3：多 episode 合并成大 parquet，视频按 `from/to_timestamp` 切片）。**2 个源文件在 OSS 上是 0 字节**：`tidy_up_workbench/videos.tar.gz.000`（上游 6.4 GB）和 `pull_drawer_number/data.tar.gz.000`（上游 35 MB）；ModelScope 下载这两个文件返回 HTTP 500，HF 镜像上没有 `dataset_lerobot3.0` 目录（`agibot-world/GenieSim3.0-Dataset` 存在但路径不同；GenieSimAssets 的目录接口 403），老格式 `dataset/` 里 `pull_drawer_number` 为空、`tidy_up_workbench` 是约 260 GB 的另一种格式。其余 196 个文件大小与上游逐一一致。这 2 个任务暂时排除，等上游修好再补。
+- 解包（dsw-share1 本地盘 `/root/GenieSim3.0-unpacked/<任务>/`，脚本 `/root/genie_unpack2.sh`，4 路并行，`cat 分卷 | tar xzf -`，完成标记 `.done`）：63 个任务，90,703 条 / 17,742,247 帧 / 164.28 h，728 GB。任务名带括号的 8 个要用 `xargs -0` 传参，第一版脚本因此漏了。本地盘上的解包目录是**唯一副本**，还没复制到 OSS。
+- `openwam/dataloader/utils/geniesim_convert.py`：原地给每个数据 parquet 加 4 列（原始列都保留，写临时文件再替换），`meta/info.json` 追加 features、`ee_pose_unverified`、`state_layout_inferred`，`geniesim_ee` 为完成标记。`python -m openwam.dataloader.utils.geniesim_convert --root /root/GenieSim3.0-unpacked`。
+- **state 布局（186 维，无字段名，官方没有公开）是反推的，没有用 G2 运动学验证**：`state[14:17]`/`[17:20]` 左/右末端 xyz；`[126:135]`/`[135:144]` 左/右末端旋转矩阵（每一帧都正交、det +1，**按行优先**，转置没排除）；`[0]`/`[1]` 夹爪开度 0..120（官方 `omnipicker_reverse_relabel_gripper`，0=闭合）。左右顺序按末端顺序假设。action 40 维：`[0:2]` 夹爪指令（量纲不同，不用）、`[2:30]` 28 个关节目标（14 个臂关节在 `[16:30]`）、`[30:38]` 机身 8 维、`[38:40]` 底盘速度恒 0；**action 里没有末端位姿**。
+- 位姿坐标系：起始帧末端位置在各任务间几乎一致（x≈0.62、y≈±0.40、z≈1.0），而机器人世界位置 `state[118:121]` 相差数米，所以 `[14:20]` 是**固定在机器人上的坐标系**（原点在底座下方地面，z 向上），不是世界系；部分任务因腰部姿态不同起始高度/伸出距离不同（z≈1.19、x≈1.1）。
+- 新列：`observation.state.ee_base` 18 维 `[L_xyz, L_rot6d, R_xyz, R_rot6d]`（rot6d = R 的前两列）；`action.ee_base` = 下一帧状态；`observation.state.gripper` / `action.gripper` `[L, R]` = `clip(开度/120, 0, 1)`，0=闭合 1=张开；action 夹爪用下一帧状态（action[0:2] 量纲未核实）。
+- 转换结果：63/63 任务成功，17,742,247 帧，**0 帧旋转矩阵不正交**；夹爪最大 0.999，左右末端位置对称、范围正常。
+- `episode_quality`：`HEAD_CAMERAS` 加入 `observation.images.top_head`（GenieSim 头部相机名；之前会退回到第一个相机，即腕部）。`--video --workers 32 --bucket-shards 4` 不到 2 分钟扫完，输出 `/root/genie_quality/`（未 apply）：90,703 条标出 12,585（13.9%）——`bad_prompt` 12,125、`rot_jump` 397、`pos_jump` 208、`too_short` 1；视频检查全部通过。`bad_prompt` 是 4 个任务**整体**（`pick_block_number` 6476、`stock_in_the_supermarket` 3018、`pick_cup_size` 1943、`pick_accessory` 688）：`tasks.parquet` 的指令就是下划线任务名（slug），不是数据问题；`meta/info.json` 的 `instruction_segments` 里每条 episode 有真实指令，读取器可以用它。运动类（跳变、过短）共 606 条，最大单步位移 0.38 m、最大单步旋转 93°。
+- **未做 / 待用户决定**：是否 `--apply`（`--apply` 会连 slug 一起排除，12,125 条不是数据缺陷；要只排除运动类需要改规则或另写）；是否复制到 OSS（728 GB，目标 `/mnt/data/datasets/GenieSim3.0-lerobotv3` 和 `filter_datasets/`）；读取器、归一化统计；用 G2 URDF 验证 EE 位姿（可用后重算）。
+- 验证：dsw-share1 `pytest tests/dataloader/test_geniesim_convert.py tests/dataloader/test_episode_quality.py` → 12 passed。
+
