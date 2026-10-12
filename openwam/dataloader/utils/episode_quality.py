@@ -22,6 +22,7 @@ Rules (thresholds are CLI flags; inspect ``quality.parquet`` before applying):
   ("fold_mat", "hit-ball-with-gripper"), or an asset ID ("microwave_gr", "Galbot_G1_…_new1");
   see ``prompt_text``. Readers with ``normalize_prompt: true`` clean the last two at load time,
   so ``--apply`` on such a dataset drops episodes the reader could still use
+* ``failed_episode``            ``next.success`` is never true in the episode (sim sets that carry the flag)
 * ``official_unqualified``       source annotators marked frames/episode unqualified
   (``unqualified_frames`` / ``coarse_quality`` written by ``galaxea_convert``)
 * ``bag_unqualified``            source per-recording automatic check failed (``bag_quality`` = ``不合格``)
@@ -101,6 +102,7 @@ OXE_SPECS = {
     "austin_sirius_dataset": ("franka_q", 7),
     "austin_buds_dataset": ("franka_q", 7),  # state[:8] = joints + gripper, rest is the flattened EE matrix
     "cmu_play_fusion": ("franka_q", 7),
+    "Meta-World-MT50": ("xyz", 3),  # sim: hand xyz + gripper opening, no rotation (identity rot6d)
 }
 # Panda modified-DH rows (alpha_{i-1}, a_{i-1}, d_i) + flange 0.107 m, hand rotation -45° about z, TCP 0.1034 m
 _PANDA_DH = ((0, 0, 0.333), (-np.pi / 2, 0, 0), (np.pi / 2, 0, 0.316), (np.pi / 2, 0.0825, 0),
@@ -223,6 +225,9 @@ def _single_arm(win, names: set, robot_type: str | None, bucket: str = ""):
         kind, grip = OXE_SPECS[bucket]
         x = _column(win, LIBERO_STATE_COL)
         eff = [x[:, grip : grip + 1] if grip is not None else _column(win, "action")[:, 6:7]]
+        if kind == "xyz":
+            ident = np.tile([1.0, 0, 0, 0, 1.0, 0], (len(x), 1))
+            return np.concatenate([x[:, :3], ident], 1), eff
         if kind == "franka_q":
             xyz, mat = franka_fk(_fill_zero_rows(np.nan_to_num(x[:, :7])))
             return np.concatenate([xyz, mat[:, :, 0], mat[:, :, 1]], 1), eff
@@ -286,13 +291,15 @@ def scan_bucket(bucket: str, video: bool = False, video_samples: int = 5, shard:
         pose_cols, eff_cols = (INTERN_POSE_COLS, INTERN_GRIPPER_COLS) if intern else ((POSE_COL,), EFFECTOR_COLS)
         if single:
             pose_cols, eff_cols = (DROID_POSE_COL, LIBERO_STATE_COL, "action"), (DROID_GRIPPER_COL,)
-        cols = [c for c in (*pose_cols, *eff_cols, CHASSIS_CMD_COL, TORSO_COL, "task_index") if c in names]
+        cols = [c for c in (*pose_cols, *eff_cols, CHASSIS_CMD_COL, TORSO_COL, "task_index", "next.success") if c in names]
         table = pq.read_table(path, columns=cols)
         for _, ep in group.iterrows():
             n, start = int(ep["length"]), int(ep["_row"])
             win = table.slice(start, n)
             r = {"bucket": root.name, "episode_index": int(ep["episode_index"]), "length": n}
             r.update({k: type(d)(ep[k]) if k in ep and pd.notna(ep[k]) else d for k, d in EPISODE_EXTRAS.items()})
+            if "next.success" in cols:  # sim sets with a success flag: an episode that never succeeds is a failure
+                r["failed"] = not bool(np.asarray(win["next.success"].to_pylist(), dtype=bool).any())
             if CHASSIS_CMD_COL in cols:
                 cmd = np.stack(win[CHASSIS_CMD_COL].to_numpy(zero_copy_only=False)).astype(np.float64)
                 r["chassis_cmd_frac"] = float((np.abs(cmd).max(axis=1) > 1e-3).mean())
@@ -339,6 +346,8 @@ def flag(df: pd.DataFrame, a: argparse.Namespace, fps_by_bucket: dict[str, float
         "static": (df["path_m"] < a.min_path_m) & (df["effector_range"] < a.min_effector_range),
         "bad_prompt": ~df["prompt_ok"],
     }
+    if "failed" in df:
+        rules["failed_episode"] = df["failed"].fillna(False).astype(bool)
     if "unqualified_frames" in df:  # older quality.parquet files (--quality) lack these columns
         coarse = df["coarse_quality"].fillna("") if "coarse_quality" in df else pd.Series("", index=df.index)
         rules["official_unqualified"] = (df["unqualified_frames"] > 0) | coarse.str.contains("unqualified")

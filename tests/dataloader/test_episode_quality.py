@@ -200,3 +200,20 @@ def test_fill_zero_rows():
     out = eq._fill_zero_rows(q)
     assert (np.abs(out).sum(1) > 0).all() and out[0, 0] == 3 and out[4, 0] in (4, 6)
     assert (eq._fill_zero_rows(np.zeros((3, 7))) == 0).all()  # nothing valid: unchanged
+
+
+def test_metaworld_xyz_spec_and_failed_rule():
+    import pyarrow as pa
+
+    state = np.c_[np.linspace(0, 0.3, 6), np.zeros(6), np.full(6, 0.2), np.linspace(1, 0.4, 6)]
+    t = pa.table({eq.LIBERO_STATE_COL: list(state)})
+    pose, eff = eq._single_arm(t, {eq.LIBERO_STATE_COL}, None, "Meta-World-MT50")
+    assert pose.shape == (6, 9) and np.allclose(pose[:, 3:9], [1, 0, 0, 0, 1, 0]) and np.allclose(eff[0][:, 0], state[:, 3])
+    assert np.isclose(eq.pose_metrics(pose)["max_step_m"], 0.06)
+
+    base = dict(bucket="b", nonfinite=False, max_step_m=0.01, max_step_deg=1.0, rot6d_err=0.0, path_m=1.0,
+                effector_range=1.0, prompt_ok=True, length=300, episode_index=0)
+    df = pd.DataFrame([{**base, "failed": False}, {**base, "episode_index": 1, "failed": True}])
+    a = argparse.Namespace(min_seconds=2.0, max_len_x_median=5.0, max_step_m=0.05, max_step_deg=20.0,
+                           min_path_m=0.05, min_effector_range=0.05)
+    assert eq.flag(df, a, {"b": 30.0}).tolist() == ["", "failed_episode"]
