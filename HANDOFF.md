@@ -1,6 +1,6 @@
 # Project Handoff
 
-更新时间：2026-10-10
+更新时间：2026-10-20
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
 当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
@@ -170,6 +170,16 @@
 - 仓库版相对探索脚本修了一个 bug：脚本算了“间隔 < 10 帧的闭合合并”却返回未合并结果。修后 4,028 集事件变化，抽查都是去掉假松开（ToolboxStorage ep1、ArrangePlates ep13）。
 - 未做：子任务 caption、读取器按片段给提示词、PourBeans 按指令分模板、擦拭 / 叠衣服类的运动细分。
 
+## G1D 仿真倒豆子后训练（2026-10-20）
+
+- 数据 `/mnt/data/datasets/G1D-自采数据/g1d_office_pour_beans_random_hand_yaw_100`：**是 RoboDojo 仿真，不是真机**（`physics_hz 600`、usdz 资产、脚本演示），100 条 / 39,827 帧 / 30 fps，左右手各倒 50 条，单指令 "Pour all red beans from the tall measuring cup into the short measuring cup."。
+- 格式核对：16 维 = `[左 7 关节, 左夹爪, 右 7 关节, 右夹爪]`（真机 flat16 是 `[左7, 右7, 左夹, 右夹]`，不能套用）；关节 action ≈ 下一帧 state（误差 0.001–0.002 rad），全部在 URDF 限位内；FK 起始两手 y=±0.149、z=0.30（躯干系）。夹爪 0 闭 … 1 开（抓杯时 state ≈0.75），而夹爪 action 是闭合命令 0，与真机 action≈state 不一致。头部相机叫 `cam_head`。
+- 用户决定：夹爪 action 用下一帧夹爪 state（末帧用自身）；只用这 100 条训练；从 G1D 真机后训练 step 20000 初始化。
+- 代码：`g1d_self_convert` 新增 schema `sim16`（布局、夹爪缩放 4.5/1.0、action 夹爪替换）和 bucket `G1D_SimPourBeansCups`（要用 `--only` 单独转到独立 out-root）；`G1DSelfDataset._resolve_cameras` 在没有 `cam_left_high` 时退回 `cam_head`。
+- 验证：`pytest tests/dataloader/test_g1d_self_convert.py tests/dataloader/test_g1_dex1.py` → 5 passed（dsw-6）；读取器 训练 35,876 / 验证 3,631 窗口，归一化后 |action| ≤ 1，夹爪归一化 0.48–0.99，三视角拼图目检正常。
+- 训练（dsw-4，8×H20，当时空闲）：代码 `/root/owam_g1dsim`，数据/权重本地 `/root/g1d_sim/{raw,eef,ckpt20000}`，启动 `/root/g1d_sim/posttrain_sim.sh`，日志 `/root/openwam_g1_logs/g1d_sim_posttrain.log`，输出 `/root/openwam_g1/runs_sim/`。超参：每卡 16 × 梯度累积 2 × 8 卡 = 256，lr 5e-5 cosine 5% warmup，`max_steps=4000` micro（2000 优化器步，约 14 遍窗口），每 500 micro 存一次（含 resume 状态）。2026-10-20 启动，初始 action loss 0.02–0.03，约 6–7 s/micro 步，预计 7 小时。dsw-4 没有 wandb key，启动脚本里设 `WANDB_MODE=offline`（第一次没设，rank 0 抛错后其余 rank 挂住）。`/root/g1d_sim/ckpt_sync_sim.sh` 复制 checkpoint 到 `/mnt/data/chongzheng/openwam_g1/ckpts_sim/stepN/`、日志到 `logs/`。
+- 未做：离线评估 / 仿真闭环评测；指令没有补改写；lr / 步数是默认选择，没有扫。
+
 ## 剩余事项与风险
 
 - AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
@@ -186,6 +196,7 @@
 
 ## 下一会话
 
+- G1D 仿真倒豆子后训练（dsw-4）：`ssh dsw-4 'tail -c 2000 /root/openwam_g1_logs/g1d_sim_posttrain.log | tr "\r" "\n" | tail -2'`；完成后用 `scripts/eval_offline.py` 对 `ckpts_sim/stepN` 做验证集评估。
 0. AgiBot 清洗：看 `/root/agibot_quality/summary.json`（dsw-2），用户确认后：`python3 -m openwam.dataloader.utils.episode_quality --root /root/AgiBotWorld-Beta-lerobotv3 --out /root/agibot_quality --video --workers 64 --apply`，再跑 `agibotworld_stats_computation --dataset_dir /root/AgiBotWorld-Beta-lerobotv3 --segment-max-trim-ratio 0.7`。
 1. 检查 dsw-1 上的 mid-train 进度：`tail -c 2000 /root/openwam_g1_logs/midtrain.log | tr '\r' '\n' | tail -2`；可以在 dsw-2 到 dsw-7 上对中间 checkpoint 做离线评估（checkpoint 在 dsw-1 本地盘，需要先复制过去）。
 2. 训练完成后：

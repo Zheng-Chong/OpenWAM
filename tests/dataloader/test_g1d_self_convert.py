@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 from scipy.spatial.transform import Rotation
 
-from openwam.dataloader.utils.g1d_self_convert import G1ArmFK
+from openwam.dataloader.utils.g1d_self_convert import G1ArmFK, arm_and_gripper
 
 
 def test_fk_arms_are_mirror_images_at_zero():
@@ -29,3 +29,14 @@ def test_fk_reproduces_official_torso_pose():
         assert np.abs(pose[:, :3] - ref[:, :3]).max() < 1e-4
         rel = Rotation.from_euler("xyz", pose[:, 3:]).inv() * Rotation.from_euler("xyz", ref[:, 3:])
         assert np.degrees(rel.magnitude()).max() < 1e-2
+
+
+def test_sim16_layout_and_gripper_action_is_next_state():
+    s = np.arange(3 * 16, dtype=float).reshape(3, 16)
+    a = s + 0.5
+    a[:, [7, 15]] = 0.0  # sim close command
+    df = pd.DataFrame({"observation.state": list(s), "action": list(a)})
+    st, act = arm_and_gripper(df, "sim16", "observation.state"), arm_and_gripper(df, "sim16", "action")
+    assert np.array_equal(st["left"][0], s[:, 0:7]) and np.array_equal(st["right"][0], s[:, 8:15])
+    assert np.array_equal(act["right"][0], a[:, 8:15])
+    assert np.array_equal(act["left"][1], s[[1, 2, 2], 7]) and np.array_equal(act["right"][1], s[[1, 2, 2], 15])

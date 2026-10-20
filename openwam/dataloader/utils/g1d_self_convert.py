@@ -15,6 +15,11 @@ Gripper: our Dex1 firmware reads ~5.4 when open (episode starts sit at 5.37–5.
 so raw values are rescaled by 4.5/5.4 onto the official scale; the reader's
 ``clip(g/4.5,0,1)*2-1`` then applies unchanged.
 
+``sim16`` (RoboDojo sim export, ``[L7, Lg, R7, Rg]``): gripper is 0 closed … 1 open,
+and the gripper *action* is the raw close command (0) while the state stalls on the
+grasped object (~0.75). Real recordings have action ≈ state, so the sim gripper
+action is replaced by the next-frame gripper state to keep one label convention.
+
 Episodes are dropped when marked bad or when the chassis moves / the lift changes
 (tabletop-only post-training), or when the data runs past the end of a video
 (truncated recording). Only parquet + meta are written; videos are
@@ -42,6 +47,7 @@ from scipy.spatial.transform import Rotation
 URDF_PATH = Path(__file__).resolve().parents[1] / "assets" / "unitree_g1_dex1.urdf"
 TOOL_OFFSET_X = 0.0635  # dex1_base_link → official "gripper" point, metres along local x
 RAW_OPEN_SELF = 5.4
+RAW_OPEN = {"sim16": 1.0}  # per-schema open reading; default RAW_OPEN_SELF
 RAW_OPEN_OFFICIAL = 4.5
 ARM_JOINTS = ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow", "wrist_roll", "wrist_pitch", "wrist_yaw")
 SIDES = ("left", "right")
@@ -61,6 +67,8 @@ SOURCES = {
     "G1D_CapybaraToBox": ("G1D-capybara_to_box", "split"),
     "G1D_Pick3ObjectsToBasket": ("G1D-pick_3objects_to_basket", "split"),
     "G1D_PickBottleToBasket": ("G1D-pick_bottle_to_basket", "split"),
+    # Simulation (RoboDojo); convert separately with --only into its own out-root.
+    "G1D_SimPourBeansCups": ("g1d_office_pour_beans_random_hand_yaw_100", "sim16"),
 }
 
 # English paraphrases ("@"-joined, same convention as the official tasks.parquet)
@@ -173,11 +181,17 @@ def arm_and_gripper(df: pd.DataFrame, schema: str, prefix: str) -> dict:
         v = _stack(df, prefix)
         grip = (14, 15) if schema == "flat16" else (17, 18)
         return {"left": (v[:, 0:7], v[:, grip[0]]), "right": (v[:, 7:14], v[:, grip[1]])}
+    if schema == "sim16":
+        v = _stack(df, prefix)
+        if prefix == "action":  # gripper label = next-frame gripper state (see module doc)
+            s = _stack(df, "observation.state")
+            v[:, [7, 15]] = np.concatenate([s[1:, [7, 15]], s[-1:, [7, 15]]])
+        return {"left": (v[:, 0:7], v[:, 7]), "right": (v[:, 8:15], v[:, 15])}
     return {s: (_stack(df, f"{prefix}.{s}_arm.qpos"), _stack(df, f"{prefix}.{s}_ee.qpos")[:, 0]) for s in SIDES}
 
 
 def episode_is_tabletop(ep: pd.DataFrame, schema: str) -> tuple[bool, str]:
-    if schema == "flat16":
+    if schema in ("flat16", "sim16"):
         return True, ""
     if schema == "flat23":
         s, a = _stack(ep, "observation.state"), _stack(ep, "action")
@@ -254,7 +268,7 @@ def convert_bucket(src: Path, out: Path, schema: str, fk: G1ArmFK) -> dict:
         for prefix in ("observation.state", "action"):
             for side, (q, g) in arm_and_gripper(ep, schema, prefix).items():
                 cols[f"{prefix}.{side}_ee_pose_gripper_torso"] = list(fk.pose(side, q).astype(np.float32))
-                cols[f"{prefix}.{side}_gripper"] = list((g * RAW_OPEN_OFFICIAL / RAW_OPEN_SELF).astype(np.float32)[:, None])
+                cols[f"{prefix}.{side}_gripper"] = list((g * RAW_OPEN_OFFICIAL / RAW_OPEN.get(schema, RAW_OPEN_SELF)).astype(np.float32)[:, None])
         cols["observation.state.recomputed_ee_valid"] = list(np.ones((len(ep), 1), np.float32))
         frames.append(pd.DataFrame(cols))
         kept.append(int(e))
@@ -302,7 +316,7 @@ def convert_bucket(src: Path, out: Path, schema: str, fk: G1ArmFK) -> dict:
             "source": str(src),
             "schema": schema,
             "fk": "urdf torso_link->dex1_base_link + 0.0635 m local x",
-            "gripper_rescale": f"{RAW_OPEN_OFFICIAL}/{RAW_OPEN_SELF}",
+            "gripper_rescale": f"{RAW_OPEN_OFFICIAL}/{RAW_OPEN.get(schema, RAW_OPEN_SELF)}",
             "dropped_episodes": dropped,
         },
     )
