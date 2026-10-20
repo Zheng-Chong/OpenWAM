@@ -176,7 +176,7 @@
 - 格式核对：16 维 = `[左 7 关节, 左夹爪, 右 7 关节, 右夹爪]`（真机 flat16 是 `[左7, 右7, 左夹, 右夹]`，不能套用）；关节 action ≈ 下一帧 state（误差 0.001–0.002 rad），全部在 URDF 限位内；FK 起始两手 y=±0.149、z=0.30（躯干系）。夹爪 0 闭 … 1 开（抓杯时 state ≈0.75），而夹爪 action 是闭合命令 0，与真机 action≈state 不一致。头部相机叫 `cam_head`。
 - 用户决定：夹爪 action 用下一帧夹爪 state（末帧用自身）；只用这 100 条训练；从 G1D 真机后训练 step 20000 初始化。
 - 代码：`g1d_self_convert` 新增 schema `sim16`（布局、夹爪缩放 4.5/1.0、action 夹爪替换）和 bucket `G1D_SimPourBeansCups`（要用 `--only` 单独转到独立 out-root）；`G1DSelfDataset._resolve_cameras` 在没有 `cam_left_high` 时退回 `cam_head`。
-- 验证：`pytest tests/dataloader/test_g1d_self_convert.py tests/dataloader/test_g1_dex1.py` → 5 passed（dsw-6）；读取器 训练 35,876 / 验证 3,631 窗口，归一化后 |action| ≤ 1，夹爪归一化 0.48–0.99，三视角拼图目检正常。
+- 验证：`pytest tests/dataloader/test_g1d_self_convert.py tests/dataloader/test_g1_dex1.py` → 5 passed（dsw-6）；读取器 训练 35,876 / 验证 3,631 窗口，归一化后 |action| ≤ 1，夹爪归一化 0.48–0.99，三视角拼图目检正常。抓握时夹爪归一化（每集最闭合值的中位数）仿真约 0.5，真机 PourBeans 左 0.46 / 右 0.51、PourBeansPlus 0.44 / 0.65、PickKettle 0.53 / 0.43、PickBottle 0.11 / 0.19：刻度一致，差异来自被夹物体宽度。
 - 训练（dsw-4，8×H20，当时空闲）：代码 `/root/owam_g1dsim`，数据/权重本地 `/root/g1d_sim/{raw,eef,ckpt20000}`，启动 `/root/g1d_sim/posttrain_sim.sh`，日志 `/root/openwam_g1_logs/g1d_sim_posttrain.log`，输出 `/root/openwam_g1/runs_sim/`。超参：每卡 16 × 梯度累积 2 × 8 卡 = 256，lr 5e-5 cosine 5% warmup，`max_steps=4000` micro（2000 优化器步，约 14 遍窗口），每 500 micro 存一次（含 resume 状态）。2026-10-20 启动，初始 action loss 0.02–0.03，约 6–7 s/micro 步，预计 7 小时。dsw-4 没有 wandb key，启动脚本里设 `WANDB_MODE=offline`（第一次没设，rank 0 抛错后其余 rank 挂住）。`/root/g1d_sim/ckpt_sync_sim.sh` 复制 checkpoint 到 `/mnt/data/chongzheng/openwam_g1/ckpts_sim/stepN/`、日志到 `logs/`。
 - 未做：离线评估 / 仿真闭环评测；指令没有补改写；lr / 步数是默认选择，没有扫。
 
