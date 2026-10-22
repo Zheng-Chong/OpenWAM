@@ -285,12 +285,12 @@ class G1DSelfDataset(G1Dex1Dataset):
     HEAD_CAMERA = "observation.images.cam_left_high"
     LEFT_WRIST_CAMERA = "observation.images.cam_left_wrist"
     RIGHT_WRIST_CAMERA = "observation.images.cam_right_wrist"
-    SIM_HEAD_CAMERA = "observation.images.cam_head"  # RoboDojo sim export
+    SIM_HEAD_CAMERAS = ("observation.images.cam_head", "observation.images.cam_high")  # RoboDojo sim exports
 
     def _resolve_cameras(self, info: dict):
         head, lw, rw = super()._resolve_cameras(info)
-        if head not in info["features"] and self.SIM_HEAD_CAMERA in info["features"]:
-            head = self.SIM_HEAD_CAMERA
+        if head not in info["features"]:
+            head = next((c for c in self.SIM_HEAD_CAMERAS if c in info["features"]), head)
         return head, lw, rw
 
     def _add_episode_offsets(self, eps: pd.DataFrame) -> None:

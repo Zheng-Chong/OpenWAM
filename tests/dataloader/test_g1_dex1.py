@@ -48,6 +48,16 @@ def test_split_is_disjoint_and_complete():
     assert len(train) + len(val) == 120
 
 
+@pytest.mark.parametrize("head", ["cam_left_high", "cam_head", "cam_high"])
+def test_g1d_self_head_camera_fallback(head):
+    from openwam.dataloader.g1_dex1 import G1DSelfDataset
+
+    ds = object.__new__(G1DSelfDataset)
+    ds._target_camera = None
+    feats = {f"observation.images.{c}": {} for c in (head, "cam_left_wrist", "cam_right_wrist")}
+    assert ds._resolve_cameras({"features": feats})[0] == f"observation.images.{head}"
+
+
 @pytest.mark.skipif(not os.environ.get("G1_DEX1_ROOT"), reason="set G1_DEX1_ROOT to the real dataset root")
 def test_real_data_samples():
     from openwam.dataloader.registry import build_dataset

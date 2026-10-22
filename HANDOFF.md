@@ -1,6 +1,6 @@
 # Project Handoff
 
-更新时间：2026-10-20
+更新时间：2026-10-22
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
 当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
 
@@ -180,6 +180,16 @@
 - 训练（dsw-4，8×H20，当时空闲）：代码 `/root/owam_g1dsim`，数据/权重本地 `/root/g1d_sim/{raw,eef,ckpt20000}`，启动 `/root/g1d_sim/posttrain_sim.sh`，日志 `/root/openwam_g1_logs/g1d_sim_posttrain.log`，输出 `/root/openwam_g1/runs_sim/`。超参：每卡 16 × 梯度累积 2 × 8 卡 = 256，lr 5e-5 cosine 5% warmup，`max_steps=4000` micro（2000 优化器步，约 14 遍窗口），每 500 micro 存一次（含 resume 状态）。2026-10-20 启动，初始 action loss 0.02–0.03，约 6–7 s/micro 步，预计 7 小时。dsw-4 没有 wandb key，启动脚本里设 `WANDB_MODE=offline`（第一次没设，rank 0 抛错后其余 rank 挂住）。`/root/g1d_sim/ckpt_sync_sim.sh` 复制 checkpoint 到 `/mnt/data/chongzheng/openwam_g1/ckpts_sim/stepN/`、日志到 `logs/`。
 - 未做：离线评估 / 仿真闭环评测；指令没有补改写；lr / 步数是默认选择，没有扫。
 
+## G1D 仿真深圳倒豆子（杯或马克杯）后训练（2026-10-22）
+
+- 数据：ModelScope 私有数据集 `ChongZheng/g1d_shenzhen_pour_beans_cup_or_mug_500`（dsw-8 上的 ModelScope 登录可访问），RoboDojo 仿真，500 条 / 199,697 帧 / 30 fps，AV1 视频，2 条指令（倒进 short measuring cup 103k 帧 / white mug 97k 帧），左右手约各半。原始数据 OSS `/mnt/data/datasets/G1D-自采数据/g1d_shenzhen_pour_beans_cup_or_mug_500`（7.03 GB，与 ModelScope 一致）；README 注明 layout seed 500–517 是训练布局，仿真评测不要用。
+- 格式与 10-20 的仿真数据相同（`sim16`：`[L7, Lg, R7, Rg]`，夹爪 action 是 0/1 指令、state 抓住时停在约 0.75，关节 action ≈ 下一帧 state），头部相机叫 `cam_high`。代码：`g1d_self_convert` 新增 bucket `G1D_SimShenzhenPourBeansCupOrMug`；`G1DSelfDataset` 头部相机回退改为候选列表 `SIM_HEAD_CAMERAS = (cam_head, cam_high)`，新增单测 `test_g1d_self_head_camera_fallback`。
+- 转换：500 条全保留、无视频截断。转换产物 OSS `/mnt/data/datasets/G1D-自采数据-eef-sim/G1D_SimShenzhenPourBeansCupOrMug`（`video_path` 指 OSS 原始视频；训练机本地副本改指本地）。读取器：训练 179,658 / 验证 18,439 窗口，|action| ≤ 1，抓握夹爪归一化中位数 0.51，三视角拼图目检正常。
+- 用户决定：从 **G1-Dex1 mid-train step 20000**（`/mnt/data/chongzheng/openwam_g1/ckpts/step20000`）初始化，只用这 500 条。
+- 训练（dsw-3，8×H20，用户指定）：代码 `/root/owam_g1dsz`，数据/权重本地 `/root/g1d_sz/{raw,eef,ckpt_mid20000}`，启动 `/root/g1d_sz/posttrain_sz.sh`，日志 `/root/openwam_g1_logs/g1d_sz_posttrain.log`，输出 `/root/openwam_g1/runs_sz/2026-10-22_09-55-46/`。超参：每卡 16 × 梯度累积 2 × 8 卡 = 256，lr 1e-4 cosine 5% warmup，`max_steps=4000` micro（2000 优化器步，约 2.9 遍训练窗口，用户选的减半方案），每 500 micro 存一次（含 resume 状态），`WANDB_MODE=offline`。2026-10-22 09:56 启动，约 5.1–5.5 s/micro，预计约 6 小时；初始 action loss 0.009、video loss 0.18。`/root/g1d_sz/ckpt_sync_sz.sh` 复制 checkpoint 到 `/mnt/data/chongzheng/openwam_g1/ckpts_sz/stepN/`、日志到 `ckpts_sz/logs/`。
+- dsw-8 上也有一份完整准备（`/root/g1d_sz`、`/root/owam_g1dsz`），当时卡被别人的 h3 缓存任务占满没用；可删。
+- 未做：离线评估、仿真闭环评测（`--env-cfg g1d_shenzhen_lab_beans_collect`）；指令没有补改写。
+
 ## 剩余事项与风险
 
 - AgiBot：HF 补下载进行中（dsw-2，日志 `/root/openwam_g1_logs/agibot_download.log`），完成后 `then_extract.sh` 自动跑第二轮提取（日志 `agibot_extract2.log`）；之后对不完整任务 `--overwrite` 重转并重新扫描。下载完成后提醒用户作废 HF token（曾在对话中明文出现）。
@@ -196,6 +206,7 @@
 
 ## 下一会话
 
+- G1D 仿真深圳倒豆子后训练（dsw-3）：`ssh dsw-3 'tail -c 2000 /root/openwam_g1_logs/g1d_sz_posttrain.log | tr "\r" "\n" | tail -2'`；完成后对 `ckpts_sz/stepN` 跑 `scripts/eval_offline.py` 验证集评估，再做仿真闭环。
 - G1D 仿真倒豆子后训练（dsw-4）：`ssh dsw-4 'tail -c 2000 /root/openwam_g1_logs/g1d_sim_posttrain.log | tr "\r" "\n" | tail -2'`；完成后用 `scripts/eval_offline.py` 对 `ckpts_sim/stepN` 做验证集评估。
 0. AgiBot 清洗：看 `/root/agibot_quality/summary.json`（dsw-2），用户确认后：`python3 -m openwam.dataloader.utils.episode_quality --root /root/AgiBotWorld-Beta-lerobotv3 --out /root/agibot_quality --video --workers 64 --apply`，再跑 `agibotworld_stats_computation --dataset_dir /root/AgiBotWorld-Beta-lerobotv3 --segment-max-trim-ratio 0.7`。
 1. 检查 dsw-1 上的 mid-train 进度：`tail -c 2000 /root/openwam_g1_logs/midtrain.log | tr '\r' '\n' | tail -2`；可以在 dsw-2 到 dsw-7 上对中间 checkpoint 做离线评估（checkpoint 在 dsw-1 本地盘，需要先复制过去）。

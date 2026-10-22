@@ -69,6 +69,7 @@ SOURCES = {
     "G1D_PickBottleToBasket": ("G1D-pick_bottle_to_basket", "split"),
     # Simulation (RoboDojo); convert separately with --only into its own out-root.
     "G1D_SimPourBeansCups": ("g1d_office_pour_beans_random_hand_yaw_100", "sim16"),
+    "G1D_SimShenzhenPourBeansCupOrMug": ("g1d_shenzhen_pour_beans_cup_or_mug_500", "sim16"),
 }
 
 # English paraphrases ("@"-joined, same convention as the official tasks.parquet)
