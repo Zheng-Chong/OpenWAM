@@ -1,8 +1,8 @@
 # Project Handoff
 
-更新时间：2026-10-22
+更新时间：2026-10-27
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
-当前目标：G1 mid-train 已完成，在自采桌面数据（G1D）上做后训练；并行准备 AgiBotWorld-Beta 数据（转换 + 规则清洗）
+当前目标：G1D 仿真深圳倒豆子 500 条上做 pi0.5 基线（训练完成，仿真闭环评测进行中），和 OpenWAM 对比
 
 ## 项目状态
 
@@ -189,6 +189,18 @@
 - 训练（dsw-3，8×H20，用户指定）：代码 `/root/owam_g1dsz`，数据/权重本地 `/root/g1d_sz/{raw,eef,ckpt_mid20000}`，启动 `/root/g1d_sz/posttrain_sz.sh`，日志 `/root/openwam_g1_logs/g1d_sz_posttrain.log`，输出 `/root/openwam_g1/runs_sz/2026-10-22_09-55-46/`。超参：每卡 16 × 梯度累积 2 × 8 卡 = 256，lr 1e-4 cosine 5% warmup，`max_steps=4000` micro（2000 优化器步，约 2.9 遍训练窗口，用户选的减半方案），每 500 micro 存一次（含 resume 状态），`WANDB_MODE=offline`。2026-10-22 09:56 启动，约 5.1–5.5 s/micro，预计约 6 小时；初始 action loss 0.009、video loss 0.18。`/root/g1d_sz/ckpt_sync_sz.sh` 复制 checkpoint 到 `/mnt/data/chongzheng/openwam_g1/ckpts_sz/stepN/`、日志到 `ckpts_sz/logs/`。
 - dsw-8 上也有一份完整准备（`/root/g1d_sz`、`/root/owam_g1dsz`），当时卡被别人的 h3 缓存任务占满没用；可删。
 - 未做：离线评估、仿真闭环评测（`--env-cfg g1d_shenzhen_lab_beans_collect`）；指令没有补改写。
+- 仿真闭环结果（5090-2 `/data/robodojo-runs/sz-cupmug-eval-20261022`，`python3 summarize.py`，seed 900 的 50 个布局）：step2000 + `--close-below 0.96` 深圳 36/49 任务 / 26/49 严格，办公室 19/49 / 16/49。
+
+## pi0.5 基线：G1D 仿真深圳倒豆子 500 条（2026-10-26 至 27）
+
+- 代码 `scripts/pi05_g1d/`：不改 XPolicyLab 自带的 openpi（`policy/Pi_05/openpi`，来自 5090-2 `leaderboard-baseline-20261022`），`openpi_g1d.py` 把配置 `pi05_g1d_sz_pour_beans` 注册进 openpi 再 runpy 跑它的脚本；`prepare_data.py` 生成训练数据副本；`train.sh` 训练；`serve.py` 用 `serve_g1d.py` 的协议提供服务（joint16 线上布局 `[L7,R7,Lg,Rg]`、夹爪原始 0..5.4 ↔ 模型 `[L7,Lg,R7,Rg]`、0..1）。
+- 数据：已发布的 LeRobot v3（OSS `/mnt/data/datasets/G1D-自采数据/g1d_shenzhen_pour_beans_cup_or_mug_500`），lerobot 0.4.4 直接读 AV1 视频；只把夹爪 action（0/1 指令）换成下一帧夹爪 state，与 OpenWAM sim16 一致，手臂 action 不变。三路相机 cam_high / 左右腕，两条指令与评测端完全一致。
+- 训练：手臂关节按相对当前 state 的增量、夹爪绝对值（openpi ALOHA 做法），分位数归一化（训练集全量统计），action_horizon 50，pi05 默认离散 state token。**用 PyTorch 训练器**：DSW 访问 GCS 的 JAX pi05_base 只有约 70 KB/s，OSS 上有 openpi 官方转换的 PyTorch 版（`/mnt/data/l30083605/openpi-assets/checkpoints/pi05_base_pytorch`，键名与 `PI0Pytorch` 一致）；venv 需按 openpi 要求把 `models_pytorch/transformers_replace` 复制进 transformers。
+- dsw-4（GPU1–7，GPU0 是别人的 OpenWAM 服务）：工作目录 `/root/pi05_g1d`（`openpi/` uv 环境、`lerobot/`、`pi05_base_pytorch/`、`checkpoints/`），全局 batch 112（每卡 16），lr 2.5e-5 cosine、500 步 warmup、10000 步（约 5.6 遍），无 EMA，约 3.6 s/步，共 10 小时。loss 0.14 → 约 0.001–0.002。日志 `/root/pi05_g1d/logs/train_sz500_bs112_10k.log`。
+- checkpoint：dsw-4 本地 2000–9999 全部（含优化器）；OSS `/mnt/data/chongzheng/pi05_g1d/ckpts/sz500_bs112_10k/{6000,9999}`（只有 model.safetensors + assets）；ModelScope 私有模型仓库 `ChongZheng/pi05-g1d-sz-pour-beans-500`（dsw-8 上传，5090-2 下载，约 6 分钟；经本机中转只有 0.4 MB/s，不要走）。
+- 开环检查（step 8000，5 个训练帧经服务端协议）：手臂平均误差 0.002–0.03 rad，夹爪与真值一致，接线正确。
+- 评测：5090-2 `/data/robodojo-runs/pi05-g1d-eval-20261026`（openpi 环境是排行榜那份的副本，只在副本里打 transformers 补丁），`run_server.sh <gpu> <port> <ckpt>`（torch.compile 预热约 3 分钟，推理约 90–150 ms）；客户端用 `sz-cupmug-eval-20261022/run_policy.sh`，设置同 OpenWAM 最优（`--smooth-sigma 2 --blend-steps 8 --close-below 0.96`），输出 `output/policy_eval/pi05s9999c096_{sz,office}`。
+- 中间结果（step 9999，2026-10-27 11:30）：两场景各 8 个布局全失败。轨迹显示能抓杯并倒，但对不准（布局 0：572 颗豆子 21 颗进目标、551 颗洒出）或夹空（布局 1）。完整 50 布局评测仍在跑。
 
 ## 剩余事项与风险
 
