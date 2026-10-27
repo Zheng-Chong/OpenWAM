@@ -200,7 +200,10 @@
 - checkpoint：dsw-4 本地 2000–9999 全部（含优化器）；OSS `/mnt/data/chongzheng/pi05_g1d/ckpts/sz500_bs112_10k/{6000,9999}`（只有 model.safetensors + assets）；ModelScope 私有模型仓库 `ChongZheng/pi05-g1d-sz-pour-beans-500`（dsw-8 上传，5090-2 下载，约 6 分钟；经本机中转只有 0.4 MB/s，不要走）。
 - 开环检查（step 8000，5 个训练帧经服务端协议）：手臂平均误差 0.002–0.03 rad，夹爪与真值一致，接线正确。
 - 评测：5090-2 `/data/robodojo-runs/pi05-g1d-eval-20261026`（openpi 环境是排行榜那份的副本，只在副本里打 transformers 补丁），`run_server.sh <gpu> <port> <ckpt>`（torch.compile 预热约 3 分钟，推理约 90–150 ms）；客户端用 `sz-cupmug-eval-20261022/run_policy.sh`，设置同 OpenWAM 最优（`--smooth-sigma 2 --blend-steps 8 --close-below 0.96`），输出 `output/policy_eval/pi05s9999c096_{sz,office}`。
-- 中间结果（step 9999，2026-10-27 11:30）：两场景各 8 个布局全失败。轨迹显示能抓杯并倒，但对不准（布局 0：572 颗豆子 21 颗进目标、551 颗洒出）或夹空（布局 1）。完整 50 布局评测仍在跑。
+- 结果（step 9999，未见过的 seed 900 布局）：`--close-below 0.96` 深圳 0/10、办公室 0/11 后停掉；办公室失败几乎全因阈值（开局预测开度 0.94–0.97 被判闭合，第 1–4 帧双手空夹，之后再不张开）。改 `--close-below 0.87`（`pi05s9999c087_*`）后不再开局空夹，但前 22 个仍 0：伸手合夹时位置不准夹空、早期撞倒目标杯、倒偏。训练 loss 低、开环误差小但闭环差。失败视频 / loss 曲线在本机 `~/Desktop/pi05_g1d_failures/`。
+- 训练量对比：官方 `pi05_libero` 30k×256，RoboDojo 排行榜基线 60k×256，Dream Machines 报告约 30k×256 才到平台；本次只有 10k×112（约 1/7 样本）。
+- **继续训练（2026-10-27 15:07 起）**：dsw-8（rank 0，`MASTER_ADDR=22.36.107.173`）+ dsw-6 双机 16 卡，每卡 16、全局 256，从 step 9999 权重初始化（优化器重置），200 步 warmup、peak 2.5e-5 cosine 到 2.5e-6、20000 步、每 2500 步存。约 3.5 s/步，预计 10-28 10:40 完成。两台的 `/root/pi05_g1d` 由 OSS `/mnt/data/chongzheng/pi05_g1d/env/openpi_env.tar`（dsw-4 的环境 + lerobot 副本 + 统计量）解出；日志 `logs/train_sz500_ft9999_bs256_20k.log`，checkpoint 只在 dsw-8 `checkpoints/pi05_g1d_sz_pour_beans/sz500_ft9999_bs256_20k/`。节点间只有 22.36.x（eth0–3，RDMA）互通，10.10.x 不通。`train.sh` 已支持 `NNODES/NODE_RANK/MASTER_ADDR`。
+- 本机 zsh 不对 `$var` 分词：`for spec in "dsw-8 0"; do set -- $spec` 会把整串当主机名，第一次双机启动因此没发出去（空等 2 小时）。
 
 ## 剩余事项与风险
 
