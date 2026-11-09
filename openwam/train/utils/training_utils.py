@@ -59,18 +59,42 @@ def log_parameter_counts(architecture, *, is_main: bool) -> None:
 def build_cosine_scheduler(optimizer, *, total_opt_steps: int, cfg, num_processes: int = 1):
     """Linear-warmup + cosine-anneal LR schedule.
 
+    With training.decay_ratio set, the cosine reaches lr * lr_min_ratio after that fraction of
+    total_opt_steps (counted from the start, warmup included) and the LR stays there.
+
     total_opt_steps is in per-process optimizer steps; prepare() wraps the scheduler in
     AcceleratedScheduler which advances it num_processes times per opt step, so scale the
     horizons by num_processes to cancel that out.
     """
-    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+    import math
+
+    from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
     t = cfg.training
     lr = float(t.learning_rate)
     warmup_ratio = float(getattr(t, "warmup_ratio", 0.05))
     lr_min_ratio = float(getattr(t, "lr_min_ratio", 0.01))
+    decay_ratio = getattr(t, "decay_ratio", None)
     n = max(int(num_processes), 1)
     warmup_steps = int(total_opt_steps * warmup_ratio)
+    if decay_ratio is not None:
+        warmup_iters = max(warmup_steps * n, 1)
+        decay_end = max(int(total_opt_steps * float(decay_ratio)) * n, warmup_iters + 1)
+
+        def factor(i):
+            if i < warmup_iters:
+                return (i + 1) / warmup_iters
+            p = min((i - warmup_iters) / (decay_end - warmup_iters), 1.0)
+            return lr_min_ratio + (1 - lr_min_ratio) * 0.5 * (1 + math.cos(math.pi * p))
+
+        logger.info(
+            "LR scheduler: cosine then hold | total_opt_steps=%d warmup=%d decay_end=%d eta_min=%.2e",
+            total_opt_steps,
+            warmup_steps,
+            decay_end // n,
+            lr * lr_min_ratio,
+        )
+        return LambdaLR(optimizer, factor)
     cosine_steps = max(total_opt_steps - warmup_steps, 1)
     warmup_iters = warmup_steps * n
     warmup_sched = LinearLR(optimizer, start_factor=1.0 / max(warmup_iters, 1), total_iters=warmup_iters)

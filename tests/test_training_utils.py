@@ -44,15 +44,50 @@ def test_reduce_step_metrics_num_processes_one_uses_fast_path():
 # --- build_cosine_scheduler (num_processes scaling) ---
 
 
-def _cosine_cfg(lr=1e-4, warmup_ratio=0.1, lr_min_ratio=0.01):
-    training = types.SimpleNamespace(learning_rate=lr, warmup_ratio=warmup_ratio, lr_min_ratio=lr_min_ratio)
+def _cosine_cfg(lr=1e-4, warmup_ratio=0.1, lr_min_ratio=0.01, decay_ratio=None):
+    training = types.SimpleNamespace(
+        learning_rate=lr, warmup_ratio=warmup_ratio, lr_min_ratio=lr_min_ratio, decay_ratio=decay_ratio
+    )
     return types.SimpleNamespace(training=training)
 
 
-def _build(total_opt_steps, num_processes, lr=1e-4, warmup_ratio=0.1, lr_min_ratio=0.01):
+def _build(total_opt_steps, num_processes, lr=1e-4, warmup_ratio=0.1, lr_min_ratio=0.01, decay_ratio=None):
     opt = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=lr)
-    cfg = _cosine_cfg(lr=lr, warmup_ratio=warmup_ratio, lr_min_ratio=lr_min_ratio)
+    cfg = _cosine_cfg(lr=lr, warmup_ratio=warmup_ratio, lr_min_ratio=lr_min_ratio, decay_ratio=decay_ratio)
     return build_cosine_scheduler(opt, total_opt_steps=total_opt_steps, cfg=cfg, num_processes=num_processes)
+
+
+def _lrs(sched, iters):
+    """LR before each of the first `iters` scheduler steps."""
+    out = []
+    for _ in range(iters):
+        out.append(sched.get_last_lr()[0])
+        sched.optimizer.step()
+        sched.step()
+    return out
+
+
+def test_cosine_then_hold_reaches_min_at_decay_ratio_and_stays():
+    # 20000 steps, warmup 300, cosine to 1e-5 by step 3000, then 1e-5 to the end
+    lrs = _lrs(_build(20000, 1, warmup_ratio=0.015, lr_min_ratio=0.1, decay_ratio=0.15), 20000)
+    assert abs(lrs[299] - 1e-4) < 1e-12
+    assert lrs[0] < lrs[150] < lrs[299]
+    assert all(a >= b for a, b in zip(lrs[300:3000], lrs[301:3001]))
+    assert abs(lrs[1650] - 5.5e-5) < 1e-7  # cosine midpoint between 1e-4 and 1e-5
+    assert all(abs(x - 1e-5) < 1e-12 for x in lrs[3000:])
+
+
+def test_cosine_then_hold_scales_horizons_by_num_processes():
+    lrs1 = _lrs(_build(1000, 1, lr_min_ratio=0.1, decay_ratio=0.5), 1000)
+    lrs8 = _lrs(_build(1000, 8, lr_min_ratio=0.1, decay_ratio=0.5), 8000)
+    # AcceleratedScheduler advances n inner steps per opt step: opt step k is inner step k * n (warmup 100 excluded)
+    assert all(abs(a - b) < 1e-12 for a, b in zip(lrs1[100:], lrs8[800::8]))
+    assert abs(lrs8[500 * 8] - 1e-5) < 1e-12
+
+
+def test_decay_ratio_none_keeps_sequential_schedule():
+    sched = _build(1000, 1, decay_ratio=None)
+    assert len(sched._schedulers) == 2
 
 
 def test_cosine_scheduler_scales_horizons_by_num_processes():

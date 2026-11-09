@@ -23,6 +23,7 @@ training:
   lr_scheduler: cosine            # cosine with linear warmup; null = constant LR
   warmup_ratio: 0.05              # Fraction of total steps for linear warmup
   lr_min_ratio: 0.01              # Minimum LR as fraction of learning_rate
+  decay_ratio: null               # Fraction of total steps at which the cosine reaches the minimum and holds; null: at the end
 
   # --- Per-module LR (null = use base learning_rate) ---
   action_lr: null                 # Override LR for action model parameters

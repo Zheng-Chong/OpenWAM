@@ -1,6 +1,6 @@
 # Project Handoff
 
-更新时间：2026-10-27
+更新时间：2026-11-09
 当前分支：g1-dex1-finetune（推送到 fork：Zheng-Chong/OpenWAM）
 当前目标：G1D 仿真深圳倒豆子 500 条上做 pi0.5 基线（训练完成，仿真闭环评测进行中），和 OpenWAM 对比
 
@@ -21,6 +21,14 @@
 - AgiBotWorld-Beta：原始数据 `/mnt/data/datasets/agibot_world_beta`（tar，仍在提取到 `agibot_world_beta_extracted`）；LeRobot v3 转换产物在 dsw-2 本地盘 `/root/AgiBotWorld-Beta-lerobotv3`。
 
 ## 最近任务
+
+### 2026-11-09 学习率调度：cosine 降到最低后保持（分支 `chongzheng/lr-decay-hold`）
+
+- 起因：G1D 倒豆子 Plus / Narrow 后训练 20000 步恒定 1e-4（`lr_min_ratio=1.0`）的 action loss 比 6000 步 cosine 退火到 1e-6 的高 50–70%（Plus 末段 0.00024 对 0.00014），video loss 低约 13%；仿真评测部分结果也没变好。曲线从 DLC 任务的 `train-rank0.log` 解析（wandb 离线，没有验证集损失）。
+- 改动：`build_cosine_scheduler` 新增可选 `training.decay_ratio`（`configs/train.yaml` 默认 `null`）：设定时换成一个 `LambdaLR`，线性预热后 cosine 在 `decay_ratio × 总步数` 处降到 `lr × lr_min_ratio`，之后保持；不设时仍是原来的 `LinearLR + CosineAnnealingLR`。按 num_processes 缩放步数与原实现相同。
+- 新训练（RoboDojo `scripts/datagen/g1d_train_dlc.py`，Hydra 覆盖项透传）：`--steps 20000 --warmup-ratio 0.015 --lr-min-ratio 0.1 training.decay_ratio=0.15`，即预热 300 步、3000 步时降到 1e-5、之后恒定。
+- 验证：dsw-1 系统 Python（torch 2.10）上 `tests/test_training_utils.py` 全过（新增 3 个：降到最低的位置和保持、多进程缩放、不设时结构不变）；全量 `tests/` 20 failed 均在 `tests/benchmarks/`，原代码上同样失败，另 12 个收集错误是缺 `benchmarks` 等评测模块。本机 Intel Mac 装不上 torch，没在本机跑。
+- 风险：恒定 1e-5 的梯度噪声仍高于 6k 结尾的 1e-6；与 6k 相比衰减长度和最低学习率同时变了。
 
 ### 目标
 - 把 AgiBotWorld-Beta 原始数据转成 `agibotworld` 读取器要的 LeRobot v3，并做规则式数据清洗（长度、数值、跳变、静止、指令、视频）。
